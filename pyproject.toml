@@ -1,0 +1,33 @@
+[project]
+name = "renovate-alert"
+version = "1.0.0"
+description = "Alert when a self-hosted Renovate on Forgejo or Gitea stops keeping up, instead of failing silently"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = ["apprise-notify @ git+https://github.com/mbologna/apprise-notify-py@v1.0.0"]
+
+[project.scripts]
+renovate-alert = "renovate_alert:main"
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["pytest>=9.0.3", "pytest-cov>=7.1.0", "ruff>=0.8.0"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --strict-markers"
+
+[tool.coverage.run]
+source = ["renovate_alert"]

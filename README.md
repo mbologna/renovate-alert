@@ -1,0 +1,67 @@
+# renovate-alert
+
+[![CI](https://github.com/mbologna/renovate-alert/actions/workflows/ci.yml/badge.svg)](https://github.com/mbologna/renovate-alert/actions/workflows/ci.yml)
+
+A daily check for a self-hosted [Renovate](https://docs.renovatebot.com/) on
+[Forgejo](https://forgejo.org/) or [Gitea](https://about.gitea.com/). It
+catches the failures Renovate doesn't report, and sends them as one
+[Apprise](https://github.com/caronc/apprise-api) digest.
+
+All of these happened without a single error anywhere:
+
+- **Renovate didn't run:** no run log newer than `RUN_STALE_HOURS`.
+- **A run failed:** the newest log says "Renovate is exiting with a non-zero code".
+- **The branch limit was hit:** new updates were skipped with a debug-level line.
+- **The Dependency Dashboard lists Repository Problems.**
+- **An update has been stuck too long:** in Rate-Limited (the merge queue isn't
+  draining) or in Pending Status Checks (usually a release with no timestamp
+  for `minimumReleaseAge`).
+- **An automerge PR stays open:** it has the automerge label and hasn't merged
+  within `OPEN_AUTOMERGE_DAYS`.
+
+Each problem is reported once, and again only if it goes away and comes back.
+The first time each update was seen, and what has been reported, are kept in
+`LOG_DIR/alert-state.json`. A digest that Apprise doesn't accept is retried on
+the next run, and that run exits non-zero so the failure is visible.
+
+## Configuration
+
+| Variable | Required | Default | |
+|---|---|---|---|
+| `FORGE_API` | yes | | API base URL, e.g. `https://codeberg.org/api/v1` |
+| `REPOSITORY` | yes | | `owner/repo` that Renovate runs on |
+| `DASHBOARD_ISSUE` | yes | | Issue number of the Dependency Dashboard |
+| `RENOVATE_TOKEN` | yes | | Token that can read the repo's issues and PRs |
+| `APPRISE_URL` | yes | | Apprise notify URL, e.g. `http://apprise:8000/notify/alerts` |
+| `LOG_DIR` | no | `/logs` | Directory holding Renovate's run logs (`renovate-*.log`, optionally `.gz`) and the state file |
+| `WEB_URL` | no | `FORGE_API` without `/api/v1` | Base URL for the dashboard link |
+| `AUTOMERGE_LABEL` | no | `renovate-automerge` | Label that marks automerge PRs |
+| `RUN_STALE_HOURS` | no | `26` | Hours without a run log before it reports one missing |
+| `PENDING_DAYS` | no | `35` | Days in Pending Status Checks before an update counts as stuck |
+| `RATE_LIMITED_DAYS` | no | `10` | Days in Rate-Limited before an update counts as stuck |
+| `OPEN_AUTOMERGE_DAYS` | no | `8` | Days an automerge PR may stay open |
+
+Renovate only writes run logs when it's told to. Set `LOG_FILE` to a
+per-run path on a volume this check can read, e.g.
+`/logs/renovate-$(date -u +%Y%m%d-%H%M%S).log`.
+
+## Running
+
+```sh
+docker run --rm \
+  -e FORGE_API=https://codeberg.org/api/v1 -e REPOSITORY=owner/repo \
+  -e DASHBOARD_ISSUE=1 -e RENOVATE_TOKEN=... \
+  -e APPRISE_URL=http://apprise:8000/notify/alerts \
+  -v renovate-logs:/logs \
+  ghcr.io/mbologna/renovate-alert:1.0.0
+```
+
+The image runs as uid 1000 and works with a read-only root filesystem. It
+only needs write access to `LOG_DIR`, for the state file.
+
+## Development
+
+```sh
+uv run pytest
+uv run ruff check . && uv run ruff format --check .
+```
