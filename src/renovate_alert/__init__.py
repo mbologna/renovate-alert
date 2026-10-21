@@ -6,9 +6,10 @@ filled branchConcurrentLimit and new updates were skipped with a debug-level
 log line, and runs that never started left nothing to read.
 
 Reads the Dependency Dashboard and the open PRs through the Forgejo/Gitea API,
-and the newest Renovate run log in LOG_DIR (written with Renovate's LOG_FILE).
-Keeps first-seen dates in LOG_DIR/alert-state.json and notifies once per
-problem, as a single Apprise digest. Never exits non-zero for a problem it
+and every Renovate run log in LOG_DIR (written with Renovate's LOG_FILE) since
+the last check. Keeps first-seen dates, and how far the logs have been read, in
+LOG_DIR/alert-state.json and notifies once per problem, as a single Apprise
+digest. Never exits non-zero for a problem it
 reports; a crash here is a bug in this program, not in Renovate. An
 undelivered digest does exit non-zero, so a failed Job shows it.
 """
@@ -59,6 +60,15 @@ HARMLESS_PROBLEMS = (
     "Could not determine resolved version after updating package file",
 )
 
+# Run log lines that mean the run failed. An ExternalHostError (a registry or
+# forge timing out, e.g. gitlab.com ETIMEDOUT on 2026-10-21) aborts the whole
+# repository, yet Renovate exits 0 unless exitCodeForErrors is set, so the Job
+# looks fine. "Repository finished" is logged for aborted runs too: its absence
+# is no sign of an abort.
+ABORTED = ('"result": "external-host-error"', "External host error causing abort")
+EXIT_ERROR = ("Renovate is exiting with a non-zero code", "Renovate is exiting with an error-specific code")
+BRANCH_LIMIT = "Reached branch limit - skipping branch creation"
+
 NOW = dt.datetime.now(dt.UTC)
 ITEM = re.compile(r"^ - \[ \] <!-- [\w-]+=(?P<branch>[^ ]+) -->\[?(?P<title>.*?)(\]\(pulls/\d+\))?$")
 
@@ -89,15 +99,29 @@ def items(lines):
     return found
 
 
-def newest_log():
-    logs = glob.glob(os.path.join(LOG_DIR, "renovate-*.log*"))
-    return max(logs, key=os.path.getmtime) if logs else None
+def run_logs():
+    """Every run log, current (plain) and rotated (.gz), oldest first."""
+    return sorted(glob.glob(os.path.join(LOG_DIR, "renovate-*.log*")), key=os.path.getmtime)
 
 
-def read_log(path):
+def run_name(path):
+    return os.path.basename(path).split(".")[0]
+
+
+def scan_log(path):
+    """Return (aborted, exit_error, branch-limit skips) for one run log.
+
+    Streamed line by line: a full debug log runs to tens of megabytes.
+    """
+    aborted = exit_error = False
+    skipped = 0
     opener = gzip.open if path.endswith(".gz") else open
     with opener(path, "rt", errors="replace") as f:
-        return f.read()
+        for line in f:
+            aborted = aborted or any(marker in line for marker in ABORTED)
+            exit_error = exit_error or any(marker in line for marker in EXIT_ERROR)
+            skipped += BRANCH_LIMIT in line
+    return aborted, exit_error, skipped
 
 
 def days(since):
@@ -114,27 +138,47 @@ def main():
     alerted = set(state.get("alerted", []))
     problems = {}  # key -> message; key decides "already alerted"
 
-    # 1. Did Renovate run, and did the run finish cleanly?
-    log = newest_log()
-    if not log:
+    # 1. Did Renovate run, and did every run since the last check finish cleanly?
+    logs = run_logs()
+    if not logs:
         problems["no-log"] = f"No Renovate run log in {LOG_DIR}."
     else:
-        age_h = (NOW.timestamp() - os.path.getmtime(log)) / 3600
+        age_h = (NOW.timestamp() - os.path.getmtime(logs[-1])) / 3600
         if age_h > RUN_STALE_HOURS:
             problems["stale"] = (
-                f"No Renovate run for {age_h:.0f}h (newest log {os.path.basename(log)}). "
+                f"No Renovate run for {age_h:.0f}h (newest log {os.path.basename(logs[-1])}). "
                 "Check whatever schedules Renovate (CronJob, timer) and its last run."
             )
-        text = read_log(log)
-        name = os.path.basename(log).split(".")[0]
-        if "Renovate is exiting with a non-zero code" in text:
-            problems["exit-error"] = f"Renovate run {name} exited with an error."
-        skipped = text.count("Reached branch limit - skipping branch creation")
-        if skipped:
-            problems["branch-limit"] = (
-                f"Run {name} hit branchConcurrentLimit and skipped {skipped} new branch(es). "
-                "Updates are arriving faster than the merge window merges them, or branches are stuck."
-            )
+
+    # Read each log modified since the newest one the last check read, so a
+    # failed run is caught even when later runs came after it. gzip keeps the
+    # mtime when the next run compresses a log, so a rotated log is not read
+    # twice. With no record yet, look back RUN_STALE_HOURS.
+    since = state.get("logs_read_until", NOW.timestamp() - RUN_STALE_HOURS * 3600)
+    new_logs = [path for path in logs if os.path.getmtime(path) > since]
+    aborted, exit_error, limited, skipped = [], [], [], 0
+    for path in new_logs:
+        run_aborted, run_exit_error, run_skipped = scan_log(path)
+        name = run_name(path)
+        if run_aborted:
+            aborted.append(name)
+        if run_exit_error:
+            exit_error.append(name)
+        if run_skipped:
+            limited.append(name)
+            skipped += run_skipped
+    if aborted:
+        problems["aborted"] = (
+            f"Renovate run {', '.join(aborted)} aborted on an external host error (a registry or the forge "
+            "timing out or failing) and skipped the whole repository, although the Job succeeded."
+        )
+    if exit_error:
+        problems["exit-error"] = f"Renovate run {', '.join(exit_error)} exited with an error."
+    if skipped:
+        problems["branch-limit"] = (
+            f"Run {', '.join(limited)} hit branchConcurrentLimit and skipped {skipped} new branch(es). "
+            "Updates are arriving faster than the merge window merges them, or branches are stuck."
+        )
 
     # 2. The dashboard: problems, and anything stuck in one state too long.
     body = get(f"issues/{DASHBOARD}")["body"]
@@ -183,9 +227,11 @@ def main():
     delivered = set(problems) if sent else set(problems) & alerted
 
     # Keys are stable while a problem lasts, so each alerts once; forgetting the
-    # resolved ones means a recurrence alerts again.
+    # resolved ones means a recurrence alerts again. An undelivered digest also
+    # keeps the logs unread, so the next run reports what was in them.
+    read_until = max((os.path.getmtime(path) for path in new_logs), default=since) if sent else since
     with open(STATE + ".tmp", "w") as f:
-        json.dump({"first_seen": current, "alerted": sorted(delivered)}, f, indent=1)
+        json.dump({"first_seen": current, "alerted": sorted(delivered), "logs_read_until": read_until}, f, indent=1)
     os.replace(STATE + ".tmp", STATE)
     if not sent:
         sys.exit("Apprise did not accept the digest; it is retried next run.")

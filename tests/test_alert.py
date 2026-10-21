@@ -1,4 +1,5 @@
 import datetime as dt
+import gzip
 import json
 import os
 
@@ -38,9 +39,31 @@ def env(tmp_path, monkeypatch):
     return log_dir, sent, prs
 
 
-def write_log(log_dir, text, age_hours=1):
-    path = log_dir / "renovate-20261018-013000.log"
-    path.write_text(text)
+# What Renovate 44 writes with LOG_FILE_FORMAT=pretty when a host error
+# aborts the repository: the run still finishes and exits 0.
+ABORTED_LOG = """ INFO: Repository started (repository=owner/infra)
+ WARN: Host error (repository=owner/infra)
+       "hostType": "gitlab-tags",
+       "packageName": "gitlab-org/cli",
+       "err": {"message": "connect ETIMEDOUT 172.65.251.78:443", "code": "ETIMEDOUT"}
+ INFO: External host error causing abort - skipping (repository=owner/infra)
+ INFO: Repository finished (repository=owner/infra)
+       "cloned": true,
+       "durationMs": 412345,
+       "result": "external-host-error",
+       "status": "unknown",
+       "enabled": true,
+       "onboarded": true
+"""
+
+
+def write_log(log_dir, text, age_hours=1, name="renovate-20261018-013000.log"):
+    path = log_dir / name
+    if name.endswith(".gz"):
+        with gzip.open(path, "wt") as f:
+            f.write(text)
+    else:
+        path.write_text(text)
     t = ra.NOW.timestamp() - age_hours * 3600
     os.utime(path, (t, t))
     return path
@@ -129,4 +152,86 @@ def test_undelivered_digest_is_retried(env, monkeypatch):
     monkeypatch.setattr(ra, "notify", lambda *a: False)
     with pytest.raises(SystemExit):
         ra.main()
-    assert json.load(open(ra.STATE))["alerted"] == []
+    state = json.load(open(ra.STATE))
+    assert state["alerted"] == []
+    # The log stays unread, so the next run reads it again and reports it.
+    assert state["logs_read_until"] < ra.NOW.timestamp() - 3600
+    sent = []
+    monkeypatch.setattr(ra, "notify", lambda url, title, body, type_: sent.append(body) or True)
+    ra.main()
+    assert "exited with an error" in sent[0]
+
+
+def test_aborted_run_is_reported(env):
+    log_dir, sent, _ = env
+    write_log(log_dir, ABORTED_LOG, name="renovate-20261021-133000.log")
+    ra.main()
+    body = sent[0][1]
+    assert "Renovate run renovate-20261021-133000 aborted on an external host error" in body
+    assert "exited with an error" not in body  # Renovate exited 0
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        " INFO: External host error causing abort - skipping (repository=owner/infra)",
+        '       "result": "external-host-error",',
+    ],
+)
+def test_either_abort_line_is_enough(env, line):
+    log_dir, sent, _ = env
+    write_log(log_dir, f" INFO: Repository started\n{line}\n INFO: Repository finished\n")
+    ra.main()
+    assert "aborted on an external host error" in sent[0][1]
+
+
+def test_error_specific_exit_code(env):
+    log_dir, sent, _ = env
+    write_log(log_dir, " INFO: Renovate is exiting with an error-specific code due to a repository error\n")
+    ra.main()
+    assert "Renovate run renovate-20261018-013000 exited with an error." in sent[0][1]
+
+
+def test_reads_every_log_since_the_last_check_including_rotated(env):
+    log_dir, sent, _ = env
+    # An earlier run, already gzipped by the next one, aborted; the newest is clean.
+    write_log(log_dir, ABORTED_LOG, age_hours=12, name="renovate-20261021-013000.log.gz")
+    write_log(
+        log_dir,
+        "Reached branch limit - skipping branch creation\n",
+        age_hours=2,
+        name="renovate-20261021-133000.log.gz",
+    )
+    newest = write_log(log_dir, " INFO: Repository finished\n", name="renovate-20261022-013000.log")
+    ra.main()
+    body = sent[0][1]
+    assert "Renovate run renovate-20261021-013000 aborted" in body
+    assert "Run renovate-20261021-133000 hit branchConcurrentLimit and skipped 1" in body
+    assert json.load(open(ra.STATE))["logs_read_until"] == os.path.getmtime(newest)
+
+
+def test_each_log_is_read_once(env):
+    log_dir, sent, _ = env
+    write_log(log_dir, ABORTED_LOG, age_hours=12, name="renovate-20261021-013000.log")
+    ra.main()
+    assert len(sent) == 1
+    # Rotation keeps the mtime: the gzipped copy of a read log is not read again.
+    plain = log_dir / "renovate-20261021-013000.log"
+    write_log(log_dir, ABORTED_LOG, age_hours=12, name="renovate-20261021-013000.log.gz")
+    plain.unlink()
+    write_log(log_dir, "clean", name="renovate-20261022-013000.log")
+    ra.main()
+    assert len(sent) == 1
+    assert "aborted" not in json.load(open(ra.STATE))["alerted"]
+    # A later aborted run is a recurrence and alerts again.
+    write_log(log_dir, ABORTED_LOG, age_hours=0, name="renovate-20261022-133000.log")
+    ra.main()
+    assert len(sent) == 2 and "renovate-20261022-133000 aborted" in sent[1][1]
+
+
+def test_first_check_looks_back_run_stale_hours(env):
+    log_dir, sent, _ = env
+    write_log(log_dir, ABORTED_LOG, age_hours=30, name="renovate-20261020-013000.log.gz")
+    write_log(log_dir, "clean", age_hours=20, name="renovate-20261020-133000.log")
+    ra.main()
+    assert "aborted" not in sent[0][1]  # the dashboard problem is still sent

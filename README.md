@@ -10,7 +10,12 @@ catches the failures Renovate doesn't report, and sends them as one
 All of these happened without a single error anywhere:
 
 - **Renovate didn't run:** no run log newer than `RUN_STALE_HOURS`.
-- **A run failed:** the newest log says "Renovate is exiting with a non-zero code".
+- **A run aborted:** a registry or the forge timed out or failed (an
+  `ExternalHostError`), so Renovate skipped the whole repository, yet exited 0.
+  The log says "External host error causing abort" or
+  `"result": "external-host-error"`.
+- **A run failed:** the log says "Renovate is exiting with a non-zero code" or
+  "... with an error-specific code".
 - **The branch limit was hit:** new updates were skipped with a debug-level line.
 - **The Dependency Dashboard lists Repository Problems**, each line reported
   on its own. Two expected warnings are skipped: `timestamp-optional,
@@ -22,10 +27,19 @@ All of these happened without a single error anywhere:
 - **An automerge PR stays open:** it has the automerge label and hasn't merged
   within `OPEN_AUTOMERGE_DAYS`.
 
-Each problem is reported once, and again only if it goes away and comes back.
-The first time each update was seen, and what has been reported, are kept in
-`LOG_DIR/alert-state.json`. A digest that Apprise doesn't accept is retried on
-the next run, and that run exits non-zero so the failure is visible.
+Every run log written since the previous check is read, current (`.log`) and
+rotated (`.log.gz`) alike, so a failed run is caught even if later runs
+succeeded. Each log is read once: the check remembers the newest modification
+time it has read, and the first check (no state yet) looks back
+`RUN_STALE_HOURS`. Rotating with `gzip` keeps the modification time, so a
+compressed log is not read again.
+
+Each problem is reported once, and again only if it goes away and comes back:
+a run failure counts as gone once a check reads only clean runs. The first time
+each update was seen, how far the logs have been read, and what has been
+reported, are kept in `LOG_DIR/alert-state.json`. A digest that Apprise doesn't
+accept is retried on the next run, logs included, and that run exits non-zero
+so the failure is visible.
 
 ## Configuration
 
@@ -39,7 +53,7 @@ the next run, and that run exits non-zero so the failure is visible.
 | `LOG_DIR` | no | `/logs` | Directory holding Renovate's run logs (`renovate-*.log`, optionally `.gz`) and the state file |
 | `WEB_URL` | no | `FORGE_API` without `/api/v1` | Base URL for the dashboard link |
 | `AUTOMERGE_LABEL` | no | `renovate-automerge` | Label that marks automerge PRs |
-| `RUN_STALE_HOURS` | no | `26` | Hours without a run log before it reports one missing |
+| `RUN_STALE_HOURS` | no | `26` | Hours without a run log before it reports one missing; also how far back the first check reads logs |
 | `PENDING_DAYS` | no | `35` | Days in Pending Status Checks before an update counts as stuck |
 | `RATE_LIMITED_DAYS` | no | `10` | Days in Rate-Limited before an update counts as stuck |
 | `OPEN_AUTOMERGE_DAYS` | no | `8` | Days an automerge PR may stay open |
