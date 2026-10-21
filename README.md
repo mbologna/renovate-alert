@@ -82,3 +82,10 @@ only needs write access to `LOG_DIR`, for the state file.
 uv run pytest
 uv run ruff check . && uv run ruff format --check .
 ```
+
+Dependencies resolve only to releases at least 7 days old (`exclude-newer`
+in `pyproject.toml`, which needs uv 0.12.12 or later), and the image installs
+exactly what `uv.lock` pins. To take a CVE fix released less than 7 days ago,
+add the package to `exclude-newer-package` as `<name> = false`, run `uv lock`,
+and remove the entry once the release is a week old. Own packages
+(`apprise-notify`) are exempt permanently.

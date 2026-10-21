@@ -14,6 +14,17 @@ renovate-alert = "renovate_alert:main"
 requires = ["uv_build>=0.12,<0.13"]
 build-backend = "uv_build"
 
+[tool.uv]
+required-version = ">=0.12.12"
+# Resolve only releases at least 7 days old, so a compromised release has
+# time to be caught and yanked before it lands in uv.lock. Relative values
+# need uv 0.12.12+; setup-uv in CI reads required-version too.
+exclude-newer = "7 days"
+# Own packages are exempt, so a fix released there can be picked up at once.
+# apprise-notify is a git dependency pinned by tag, which the cutoff does not
+# cover anyway; the entry keeps it exempt if it moves to a registry.
+exclude-newer-package = { apprise-notify = false }
+
 [dependency-groups]
 dev = ["pytest>=9.0.3", "pytest-cov>=7.1.0", "ruff>=0.8.0"]
 
