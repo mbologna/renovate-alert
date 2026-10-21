@@ -67,6 +67,27 @@ def test_reports_log_and_dashboard_problems_once(env):
     assert len(sent) == 1  # nothing new the second time
 
 
+def test_repository_problems_are_keyed_per_line(env, monkeypatch):
+    log_dir, sent, _ = env
+    write_log(log_dir, "ok")
+    dashboard = DASHBOARD
+    monkeypatch.setattr(ra, "get", lambda path: {"body": dashboard} if path.startswith("issues/") else [])
+    ra.main()
+    assert "Dashboard Repository Problem: WARN: Package lookup failures" in sent[0][1]
+    assert "repo-problem:WARN: Package lookup failures" in json.load(open(ra.STATE))["alerted"]
+
+    # A second line appears: only it is sent, the first is not repeated.
+    dashboard = DASHBOARD.replace(" - WARN: Package", " - WARN: Base branch does not exist\n - WARN: Package")
+    ra.main()
+    assert len(sent) == 2
+    assert "Base branch does not exist" in sent[1][1] and "Package lookup failures" not in sent[1][1]
+
+    # The new line clears: the remaining one is still not repeated.
+    dashboard = DASHBOARD
+    ra.main()
+    assert len(sent) == 2
+
+
 def test_stuck_items_count_from_first_seen(env):
     log_dir, sent, _ = env
     write_log(log_dir, "ok")

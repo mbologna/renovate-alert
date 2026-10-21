@@ -133,9 +133,9 @@ def main():
         for line in secs.get("Repository Problems", [])
         if line.startswith(" - ") and "timestamp-optional, proceeding" not in line
     ]
-    if repo_problems:
-        key = "repo-problems:" + "|".join(sorted(repo_problems))
-        problems[key] = "Dashboard Repository Problems: " + "; ".join(repo_problems)
+    # One key per line: a line appearing or clearing must not re-send the others.
+    for line in repo_problems:
+        problems[f"repo-problem:{line}"] = f"Dashboard Repository Problem: {line}"
 
     current = {}
     for section, limit, what in (
