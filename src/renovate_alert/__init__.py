@@ -46,6 +46,19 @@ OPEN_AUTOMERGE_DAYS = int(os.environ.get("OPEN_AUTOMERGE_DAYS", "8"))
 # Runs every day, the longest gap between scheduled runs is 11h45m.
 RUN_STALE_HOURS = int(os.environ.get("RUN_STALE_HOURS", "26"))
 
+# Dashboard Repository Problems that are expected, so never reported.
+HARMLESS_PROBLEMS = (
+    # Rules that opt out of the age gate on purpose (minimumReleaseAgeBehaviour
+    # timestamp-optional) log this for every such update.
+    "timestamp-optional, proceeding",
+    # After updating a file, Renovate re-reads it to check that no version
+    # still inside minimumReleaseAge got pulled in; when it can't find a
+    # version to compare it skips that extra check and logs this. Terraform
+    # provider and lock file branches trigger it on every run, and the update
+    # itself goes ahead normally.
+    "Could not determine resolved version after updating package file",
+)
+
 NOW = dt.datetime.now(dt.UTC)
 ITEM = re.compile(r"^ - \[ \] <!-- [\w-]+=(?P<branch>[^ ]+) -->\[?(?P<title>.*?)(\]\(pulls/\d+\))?$")
 
@@ -126,12 +139,10 @@ def main():
     # 2. The dashboard: problems, and anything stuck in one state too long.
     body = get(f"issues/{DASHBOARD}")["body"]
     secs = sections(body)
-    # The timestamp-optional notices come from rules that opt out of the age
-    # gate on purpose (see renovate.json), so they are not problems.
     repo_problems = [
         line[3:].strip()
         for line in secs.get("Repository Problems", [])
-        if line.startswith(" - ") and "timestamp-optional, proceeding" not in line
+        if line.startswith(" - ") and not any(harmless in line for harmless in HARMLESS_PROBLEMS)
     ]
     # One key per line: a line appearing or clearing must not re-send the others.
     for line in repo_problems:

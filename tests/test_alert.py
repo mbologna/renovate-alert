@@ -12,6 +12,7 @@ DASHBOARD = """This issue lists Renovate updates.
 
  - WARN: Package lookup failures
  - WARN: minimumReleaseAge timestamp-optional, proceeding
+ - WARN: Could not determine resolved version after updating package file; skipping pending-version check
 
 ## Rate-Limited
 
@@ -61,7 +62,8 @@ def test_reports_log_and_dashboard_problems_once(env):
     assert title == "Renovate (owner/infra): 3 new problem(s)"
     assert "hit branchConcurrentLimit and skipped 1" in body
     assert "exited with an error" in body
-    assert "Package lookup failures" in body and "timestamp-optional" not in body
+    assert "Package lookup failures" in body
+    assert "timestamp-optional" not in body and "Could not determine resolved version" not in body
     assert body.endswith("Dashboard: https://forge.example/owner/infra/issues/7")
     ra.main()
     assert len(sent) == 1  # nothing new the second time

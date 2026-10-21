@@ -12,7 +12,10 @@ All of these happened without a single error anywhere:
 - **Renovate didn't run:** no run log newer than `RUN_STALE_HOURS`.
 - **A run failed:** the newest log says "Renovate is exiting with a non-zero code".
 - **The branch limit was hit:** new updates were skipped with a debug-level line.
-- **The Dependency Dashboard lists Repository Problems.**
+- **The Dependency Dashboard lists Repository Problems**, each line reported
+  on its own. Two expected warnings are skipped: `timestamp-optional,
+  proceeding` and `Could not determine resolved version after updating
+  package file` (Terraform provider and lock file branches log it every run).
 - **An update has been stuck too long:** in Rate-Limited (the merge queue isn't
   draining) or in Pending Status Checks (usually a release with no timestamp
   for `minimumReleaseAge`).
