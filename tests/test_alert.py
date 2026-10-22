@@ -235,3 +235,30 @@ def test_first_check_looks_back_run_stale_hours(env):
     write_log(log_dir, "clean", age_hours=20, name="renovate-20261020-133000.log")
     ra.main()
     assert "aborted" not in sent[0][1]  # the dashboard problem is still sent
+
+
+def test_logs_only_mode_with_its_own_prefix(env, monkeypatch):
+    # Without FORGE_API (a Renovate on GitLab): only its own run logs, no
+    # dashboard or PR calls, and the title names it by NAME.
+    log_dir, sent, _ = env
+    monkeypatch.setattr(ra, "API", "")
+    monkeypatch.setattr(ra, "NAME", "GitLab")
+    monkeypatch.setattr(ra, "LOG_PREFIX", "gitlab-renovate-")
+    monkeypatch.setattr(ra, "get", lambda path: pytest.fail(f"forge API called: {path}"))
+    write_log(log_dir, ABORTED_LOG, name="gitlab-renovate-20261023-053000.log")
+    write_log(log_dir, " INFO: Renovate is exiting with a non-zero code\n", name="renovate-20261023-011500.log")
+    ra.main()
+    title, body = sent[0]
+    assert title == "Renovate (GitLab): 1 new problem(s)"
+    assert "gitlab-renovate-20261023-053000 aborted" in body
+    assert "exited with an error" not in body  # the other prefix's log is not read
+    assert "Dashboard:" not in body
+
+
+def test_logs_only_mode_reports_a_missing_run(env, monkeypatch):
+    log_dir, sent, _ = env
+    monkeypatch.setattr(ra, "API", "")
+    monkeypatch.setattr(ra, "LOG_PREFIX", "gitlab-renovate-")
+    write_log(log_dir, " INFO: done\n", age_hours=30, name="gitlab-renovate-20261021-053000.log")
+    ra.main()
+    assert "No Renovate run for 30h (newest log gitlab-renovate-20261021-053000.log)" in sent[0][1]

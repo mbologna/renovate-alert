@@ -7,7 +7,8 @@ log line, and runs that never started left nothing to read.
 
 Reads the Dependency Dashboard and the open PRs through the Forgejo/Gitea API,
 and every Renovate run log in LOG_DIR (written with Renovate's LOG_FILE) since
-the last check. Keeps first-seen dates, and how far the logs have been read, in
+the last check. Without FORGE_API it checks the run logs only, for a Renovate
+on another platform (one instance per log prefix, with its own state file). Keeps first-seen dates, and how far the logs have been read, in
 LOG_DIR/alert-state.json and notifies once per problem, as a single Apprise
 digest. Never exits non-zero for a problem it
 reports; a crash here is a bug in this program, not in Renovate. An
@@ -26,17 +27,25 @@ import urllib.request
 from apprise_notify import notify
 
 # FORGE_API is the Forgejo/Gitea API base, e.g. https://codeberg.org/api/v1
-# (CODEBERG_API, its first name, still works).
-API = os.environ.get("FORGE_API") or os.environ["CODEBERG_API"]
-REPO = os.environ["REPOSITORY"]
-DASHBOARD = os.environ["DASHBOARD_ISSUE"]
-TOKEN = os.environ["RENOVATE_TOKEN"]
+# (CODEBERG_API, its first name, still works). Unset: run logs only, no
+# dashboard or PR checks (e.g. a Renovate run on GitLab).
+API = os.environ.get("FORGE_API") or os.environ.get("CODEBERG_API", "")
+REPO = os.environ.get("REPOSITORY", "")
+DASHBOARD = os.environ.get("DASHBOARD_ISSUE", "")
+TOKEN = os.environ.get("RENOVATE_TOKEN", "")
+if API and not (REPO and DASHBOARD and TOKEN):
+    sys.exit("FORGE_API needs REPOSITORY, DASHBOARD_ISSUE and RENOVATE_TOKEN.")
 APPRISE_URL = os.environ["APPRISE_URL"]
+# Names the Renovate in the digest title: the repository, or NAME in logs-only mode.
+NAME = os.environ.get("NAME") or REPO or "Renovate"
 # Web URL of the repository, for the dashboard link: the API URL without /api/v1.
 WEB_URL = os.environ.get("WEB_URL") or API.removesuffix("/").removesuffix("/api/v1")
 AUTOMERGE_LABEL = os.environ.get("AUTOMERGE_LABEL", "renovate-automerge")
 LOG_DIR = os.environ.get("LOG_DIR", "/logs")
-STATE = os.path.join(LOG_DIR, "alert-state.json")
+# Run logs are LOG_PREFIX*.log[.gz]. Two Renovates can share LOG_DIR with
+# different prefixes; each check then needs its own STATE_FILE.
+LOG_PREFIX = os.environ.get("LOG_PREFIX", "renovate-")
+STATE = os.path.join(LOG_DIR, os.environ.get("STATE_FILE", "alert-state.json"))
 
 # Days before something counts as stuck. Pending legitimately lasts as long as
 # the longest minimumReleaseAge (30 days); rate-limited items drain at about
@@ -101,7 +110,7 @@ def items(lines):
 
 def run_logs():
     """Every run log, current (plain) and rotated (.gz), oldest first."""
-    return sorted(glob.glob(os.path.join(LOG_DIR, "renovate-*.log*")), key=os.path.getmtime)
+    return sorted(glob.glob(os.path.join(LOG_DIR, f"{glob.escape(LOG_PREFIX)}*.log*")), key=os.path.getmtime)
 
 
 def run_name(path):
@@ -180,6 +189,33 @@ def main():
             "Updates are arriving faster than the merge window merges them, or branches are stuck."
         )
 
+    current = {}
+    if API:
+        check_forge(problems, seen, current)
+
+    new = {k: v for k, v in problems.items() if k not in alerted}
+    sent = True
+    if new:
+        lines = [f"- {v}" for v in new.values()]
+        link = f"\n\nDashboard: {WEB_URL}/{REPO}/issues/{DASHBOARD}" if API else ""
+        sent = notify(APPRISE_URL, f"Renovate ({NAME}): {len(new)} new problem(s)", "\n".join(lines) + link, "warning")
+    print(f"{len(problems)} problem(s), {len(new)} new", *problems.values(), sep="\n")
+    # Undelivered problems stay unalerted, so the next run tries again.
+    delivered = set(problems) if sent else set(problems) & alerted
+
+    # Keys are stable while a problem lasts, so each alerts once; forgetting the
+    # resolved ones means a recurrence alerts again. An undelivered digest also
+    # keeps the logs unread, so the next run reports what was in them.
+    read_until = max((os.path.getmtime(path) for path in new_logs), default=since) if sent else since
+    with open(STATE + ".tmp", "w") as f:
+        json.dump({"first_seen": current, "alerted": sorted(delivered), "logs_read_until": read_until}, f, indent=1)
+    os.replace(STATE + ".tmp", STATE)
+    if not sent:
+        sys.exit("Apprise did not accept the digest; it is retried next run.")
+
+
+def check_forge(problems, seen, current):
+    """Dashboard problems, stuck updates and automerge PRs that never merge."""
     # 2. The dashboard: problems, and anything stuck in one state too long.
     body = get(f"issues/{DASHBOARD}")["body"]
     secs = sections(body)
@@ -192,7 +228,6 @@ def main():
     for line in repo_problems:
         problems[f"repo-problem:{line}"] = f"Dashboard Repository Problem: {line}"
 
-    current = {}
     for section, limit, what in (
         ("Rate-Limited", RATE_LIMITED_DAYS, "rate-limited (queue not draining)"),
         ("Pending Status Checks", PENDING_DAYS, "pending (likely no release timestamp)"),
@@ -211,27 +246,3 @@ def main():
             age = days(pr["created_at"])
             if age >= OPEN_AUTOMERGE_DAYS:
                 problems[f"pr:{pr['number']}"] = f"PR #{pr['number']} {pr['title']}: automerge PR open for {age} days."
-
-    new = {k: v for k, v in problems.items() if k not in alerted}
-    sent = True
-    if new:
-        lines = [f"- {v}" for v in new.values()]
-        sent = notify(
-            APPRISE_URL,
-            f"Renovate ({REPO}): {len(new)} new problem(s)",
-            "\n".join(lines) + f"\n\nDashboard: {WEB_URL}/{REPO}/issues/{DASHBOARD}",
-            "warning",
-        )
-    print(f"{len(problems)} problem(s), {len(new)} new", *problems.values(), sep="\n")
-    # Undelivered problems stay unalerted, so the next run tries again.
-    delivered = set(problems) if sent else set(problems) & alerted
-
-    # Keys are stable while a problem lasts, so each alerts once; forgetting the
-    # resolved ones means a recurrence alerts again. An undelivered digest also
-    # keeps the logs unread, so the next run reports what was in them.
-    read_until = max((os.path.getmtime(path) for path in new_logs), default=since) if sent else since
-    with open(STATE + ".tmp", "w") as f:
-        json.dump({"first_seen": current, "alerted": sorted(delivered), "logs_read_until": read_until}, f, indent=1)
-    os.replace(STATE + ".tmp", STATE)
-    if not sent:
-        sys.exit("Apprise did not accept the digest; it is retried next run.")

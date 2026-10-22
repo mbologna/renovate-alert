@@ -45,18 +45,26 @@ so the failure is visible.
 
 | Variable | Required | Default | |
 |---|---|---|---|
-| `FORGE_API` | yes | | API base URL, e.g. `https://codeberg.org/api/v1` |
-| `REPOSITORY` | yes | | `owner/repo` that Renovate runs on |
-| `DASHBOARD_ISSUE` | yes | | Issue number of the Dependency Dashboard |
-| `RENOVATE_TOKEN` | yes | | Token that can read the repo's issues and PRs |
+| `FORGE_API` | no | | API base URL, e.g. `https://codeberg.org/api/v1`. Unset: run logs only (see below) |
+| `REPOSITORY` | with `FORGE_API` | | `owner/repo` that Renovate runs on |
+| `DASHBOARD_ISSUE` | with `FORGE_API` | | Issue number of the Dependency Dashboard |
+| `RENOVATE_TOKEN` | with `FORGE_API` | | Token that can read the repo's issues and PRs |
 | `APPRISE_URL` | yes | | Apprise notify URL, e.g. `http://apprise:8000/notify/alerts` |
-| `LOG_DIR` | no | `/logs` | Directory holding Renovate's run logs (`renovate-*.log`, optionally `.gz`) and the state file |
+| `LOG_DIR` | no | `/logs` | Directory holding Renovate's run logs and the state file |
 | `WEB_URL` | no | `FORGE_API` without `/api/v1` | Base URL for the dashboard link |
+| `LOG_PREFIX` | no | `renovate-` | Run logs are `LOG_PREFIX*.log[.gz]` |
+| `STATE_FILE` | no | `alert-state.json` | State file name in `LOG_DIR`; give each check its own |
+| `NAME` | no | `REPOSITORY` | Name in the digest title |
 | `AUTOMERGE_LABEL` | no | `renovate-automerge` | Label that marks automerge PRs |
 | `RUN_STALE_HOURS` | no | `26` | Hours without a run log before it reports one missing; also how far back the first check reads logs |
 | `PENDING_DAYS` | no | `35` | Days in Pending Status Checks before an update counts as stuck |
 | `RATE_LIMITED_DAYS` | no | `10` | Days in Rate-Limited before an update counts as stuck |
 | `OPEN_AUTOMERGE_DAYS` | no | `8` | Days an automerge PR may stay open |
+
+Without `FORGE_API` the check reads the run logs only (missing runs, aborted or
+failed runs, the branch limit), for a Renovate on a platform it can't query,
+such as GitLab. Two Renovates can share `LOG_DIR` if their logs use different
+`LOG_PREFIX`es; run one check per prefix, each with its own `STATE_FILE`.
 
 Renovate only writes run logs when it's told to. Set `LOG_FILE` to a
 per-run path on a volume this check can read, e.g.
