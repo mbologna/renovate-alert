@@ -78,7 +78,10 @@ def test_sections_and_items():
 
 def test_reports_log_and_dashboard_problems_once(env):
     log_dir, sent, _ = env
-    write_log(log_dir, "x\nReached branch limit - skipping branch creation\nRenovate is exiting with a non-zero code\n")
+    write_log(
+        log_dir,
+        "x\nBranches limit reached\nReached branch limit - skipping branch creation\nRenovate is exiting with a non-zero code\n",
+    )
     ra.main()
     assert len(sent) == 1
     title, body = sent[0]
@@ -123,6 +126,44 @@ def test_stuck_items_count_from_first_seen(env):
     body = sent[0][1]
     assert "update foo to v1.2: pending (likely no release timestamp) for 40 days." in body
     assert "alpine" not in body  # rate-limited, but only first seen today
+
+
+# What Renovate 44 writes with LOG_FILE_FORMAT=pretty before each skipped
+# branch: the line naming the limit, its fields, then the shared skip line.
+def limit_log(*skips):
+    out = []
+    for message, field, branch in skips:
+        ids = f"(repository=owner/dotfiles, branch={branch})"
+        out += [
+            f"DEBUG: {message} {ids}",
+            f'       "{field}": 2,',
+            f"DEBUG: Reached branch limit - skipping branch creation {ids}",
+        ]
+    return "\n".join(out) + "\n"
+
+
+def test_branch_limit_skips_are_told_apart_and_deduplicated(env):
+    log_dir, sent, _ = env
+    branches = ("Branches limit reached", "currentCount", "renovate/fastfetch")
+    hourly = ("Hourly PRs limit reached", "hourlyPrCount", "renovate/chezmoi")
+    vulnerability = ("VulnerabilityBranches limit reached", "currentCount", "renovate/uv-vulnerability")
+    write_log(log_dir, limit_log(branches, vulnerability), age_hours=2, name="renovate-20261023-053013.log.gz")
+    write_log(log_dir, limit_log(branches, hourly), age_hours=1, name="renovate-20261023-062945.log")
+    ra.main()
+    body = sent[0][1]
+    assert (
+        "Run renovate-20261023-053013, renovate-20261023-062945 hit branchConcurrentLimit "
+        "and skipped 2 new branch(es). Updates are arriving" in body
+    )
+    assert "Run renovate-20261023-062945 hit prHourlyLimit and skipped 1 new branch(es). An hourly cap" in body
+    assert {"branch-limit", "branch-limit:prHourlyLimit"} <= set(json.load(open(ra.STATE))["alerted"])
+
+
+def test_branch_limit_without_a_limit_line(env):
+    log_dir, sent, _ = env
+    write_log(log_dir, "Reached branch limit - skipping branch creation\n" * 2)
+    ra.main()
+    assert "hit an unidentified limit and skipped 2 new branch(es)." in sent[0][1]
 
 
 def test_stale_and_missing_logs(env):
@@ -198,7 +239,7 @@ def test_reads_every_log_since_the_last_check_including_rotated(env):
     write_log(log_dir, ABORTED_LOG, age_hours=12, name="renovate-20261021-013000.log.gz")
     write_log(
         log_dir,
-        "Reached branch limit - skipping branch creation\n",
+        "Branches limit reached\nReached branch limit - skipping branch creation\n",
         age_hours=2,
         name="renovate-20261021-133000.log.gz",
     )

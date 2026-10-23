@@ -77,6 +77,21 @@ HARMLESS_PROBLEMS = (
 ABORTED = ('"result": "external-host-error"', "External host error causing abort")
 EXIT_ERROR = ("Renovate is exiting with a non-zero code", "Renovate is exiting with an error-specific code")
 BRANCH_LIMIT = "Reached branch limit - skipping branch creation"
+# Renovate logs BRANCH_LIMIT whichever limit stopped the branch; the debug
+# line just before it names the limit (workers/global/limits.ts).
+LIMIT_REACHED = re.compile(r"\b(Hourly PRs|Hourly commits|Commits|(?:Vulnerability)?Branches) limit reached")
+LIMIT_OPTION = {
+    "Hourly PRs": "prHourlyLimit",
+    "Hourly commits": "commitHourlyLimit",
+    "Commits": "prCommitsPerRunLimit",
+    "Branches": "branchConcurrentLimit",
+    "VulnerabilityBranches": "branchConcurrentLimit",
+}
+LIMIT_HINT = {
+    "branchConcurrentLimit": "Updates are arriving faster than the merge window merges them, or branches are stuck.",
+    "prHourlyLimit": "An hourly cap parks updates even while the queue has room; Renovate's default is 2.",
+}
+BRANCH_ID = re.compile(r"\(repository=[^,)]+, branch=[^)]+\)")
 
 NOW = dt.datetime.now(dt.UTC)
 ITEM = re.compile(r"^ - \[ \] <!-- [\w-]+=(?P<branch>[^ ]+) -->\[?(?P<title>.*?)(\]\(pulls/\d+\))?$")
@@ -120,16 +135,24 @@ def run_name(path):
 def scan_log(path):
     """Return (aborted, exit_error, branch-limit skips) for one run log.
 
-    Streamed line by line: a full debug log runs to tens of megabytes.
+    The skips map each limit option to the branches it kept from being
+    created, as "(repository=..., branch=...)" ids. Streamed line by line: a
+    full debug log runs to tens of megabytes.
     """
     aborted = exit_error = False
-    skipped = 0
+    skipped = {}
+    limit = None
     opener = gzip.open if path.endswith(".gz") else open
     with opener(path, "rt", errors="replace") as f:
-        for line in f:
+        for n, line in enumerate(f):
             aborted = aborted or any(marker in line for marker in ABORTED)
             exit_error = exit_error or any(marker in line for marker in EXIT_ERROR)
-            skipped += BRANCH_LIMIT in line
+            if m := LIMIT_REACHED.search(line):
+                limit = LIMIT_OPTION[m[1]]
+            elif BRANCH_LIMIT in line:
+                branch = BRANCH_ID.search(line)
+                skipped.setdefault(limit or "an unidentified limit", set()).add(branch[0] if branch else f"{path}:{n}")
+                limit = None
     return aborted, exit_error, skipped
 
 
@@ -165,7 +188,8 @@ def main():
     # twice. With no record yet, look back RUN_STALE_HOURS.
     since = state.get("logs_read_until", NOW.timestamp() - RUN_STALE_HOURS * 3600)
     new_logs = [path for path in logs if os.path.getmtime(path) > since]
-    aborted, exit_error, limited, skipped = [], [], [], 0
+    # A branch skipped again by each run is one problem, not one per run.
+    aborted, exit_error, limited, skipped = [], [], {}, {}
     for path in new_logs:
         run_aborted, run_exit_error, run_skipped = scan_log(path)
         name = run_name(path)
@@ -173,9 +197,9 @@ def main():
             aborted.append(name)
         if run_exit_error:
             exit_error.append(name)
-        if run_skipped:
-            limited.append(name)
-            skipped += run_skipped
+        for option, branches in run_skipped.items():
+            limited.setdefault(option, []).append(name)
+            skipped.setdefault(option, set()).update(branches)
     if aborted:
         problems["aborted"] = (
             f"Renovate run {', '.join(aborted)} aborted on an external host error (a registry or the forge "
@@ -183,11 +207,13 @@ def main():
         )
     if exit_error:
         problems["exit-error"] = f"Renovate run {', '.join(exit_error)} exited with an error."
-    if skipped:
-        problems["branch-limit"] = (
-            f"Run {', '.join(limited)} hit branchConcurrentLimit and skipped {skipped} new branch(es). "
-            "Updates are arriving faster than the merge window merges them, or branches are stuck."
-        )
+    for option, branches in sorted(skipped.items()):
+        # "branch-limit" alone is branchConcurrentLimit's key from before limits were told apart.
+        key = "branch-limit" if option == "branchConcurrentLimit" else f"branch-limit:{option}"
+        problems[key] = (
+            f"Run {', '.join(limited[option])} hit {option} and skipped {len(branches)} new branch(es). "
+            + LIMIT_HINT.get(option, "")
+        ).rstrip()
 
     current = {}
     if API:

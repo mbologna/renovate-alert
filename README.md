@@ -16,7 +16,11 @@ All of these happened without a single error anywhere:
   `"result": "external-host-error"`.
 - **A run failed:** the log says "Renovate is exiting with a non-zero code" or
   "... with an error-specific code".
-- **The branch limit was hit:** new updates were skipped with a debug-level line.
+- **A limit kept new branches from being created:** Renovate logs the same
+  debug-level skip line for every limit, so the line before it decides which
+  one is reported (`branchConcurrentLimit`, `prHourlyLimit`,
+  `commitHourlyLimit` or `prCommitsPerRunLimit`). A branch skipped by several
+  runs counts once.
 - **The Dependency Dashboard lists Repository Problems**, each line reported
   on its own. Two expected warnings are skipped: `timestamp-optional,
   proceeding` and `Could not determine resolved version after updating
