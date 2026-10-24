@@ -11,7 +11,7 @@ dependencies = ["apprise-notify @ git+https://github.com/mbologna/apprise-notify
 renovate-alert = "renovate_alert:main"
 
 [build-system]
-requires = ["uv_build>=0.12,<0.13"]
+requires = ["uv_build>=0.13,<0.14"]
 build-backend = "uv_build"
 
 [tool.uv]
