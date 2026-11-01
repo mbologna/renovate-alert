@@ -1,4 +1,4 @@
-FROM python:3.15.0-alpine@sha256:2699b90f4d562a22e2dd076c82f964032f64814204bff36d271a54ba4cc2c7e2 AS build
+FROM python:3.15.1-alpine@sha256:54448f67d7c31c39e5cdd3ea2d6382395ce142806c284425f8e897d78a0465b3 AS build
 
 # git: apprise-notify is a git dependency. Installed into a virtualenv, so the
 # runtime stage needs neither git nor uv.
@@ -16,7 +16,7 @@ COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src/ src/
 RUN uv sync --locked --no-dev --no-editable
 
-FROM python:3.15.0-alpine@sha256:2699b90f4d562a22e2dd076c82f964032f64814204bff36d271a54ba4cc2c7e2
+FROM python:3.15.1-alpine@sha256:54448f67d7c31c39e5cdd3ea2d6382395ce142806c284425f8e897d78a0465b3
 COPY --from=build /opt/venv /opt/venv
 ENV PATH=/opt/venv/bin:$PATH PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 USER 1000:1000
