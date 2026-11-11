@@ -45,6 +45,10 @@ reported, are kept in `LOG_DIR/alert-state.json`. A digest that Apprise doesn't
 accept is retried on the next run, logs included, and that run exits non-zero
 so the failure is visible.
 
+A second, optional check (`NEEDS_YOU`, below) lists the Renovate PRs that
+need a person, on GitHub, GitLab and Forgejo: the ones held for manual review,
+and the ones whose CI failed.
+
 ## Configuration
 
 | Variable | Required | Default | |
@@ -73,6 +77,98 @@ such as GitLab. Two Renovates can share `LOG_DIR` if their logs use different
 Renovate only writes run logs when it's told to. Set `LOG_FILE` to a
 per-run path on a volume this check can read, e.g.
 `/logs/renovate-$(date -u +%Y%m%d-%H%M%S).log`.
+
+## PRs that need you
+
+With `NEEDS_YOU=on` each run also reads the open Renovate PRs on up to three
+forges and sends one more Apprise message listing those that need a person,
+grouped by forge and repository, each with its title, URL, reason and age in
+days. `NEEDS_YOU=only` runs this check alone, without the run log checks.
+
+A PR needs you when:
+
+- **it waits for a manual review:** it has the `MANUAL_REVIEW_LABEL` label, or
+  lacks `AUTOMERGE_LABEL`. If its body has a line starting with "Why this waits
+  for you" (emoji and bold markup aside), that line is quoted under it;
+- **its CI failed:** a check on its head commit failed. GitHub: a check run
+  concluded `failure`, `timed_out` or `startup_failure`, or a commit status is
+  `failure` or `error`. GitLab: the head pipeline failed; the failed jobs that
+  aren't allowed to fail are named. Forgejo: the combined commit status is
+  `failure` or `error`.
+
+Pending or running CI doesn't count, nor do draft PRs.
+
+The message is sent when something new appears: a PR, or a new reason for one
+already listed (its CI going red, say). A PR that merely stays open is not
+repeated, and one that goes away (merged, CI fixed) sends nothing; if it comes
+back, it is new again. On Mondays the full list goes out as a reminder, if it
+isn't empty. What was last sent is kept in `LOG_DIR/needs-you-state.json`,
+keyed by PR URL and reason.
+
+A forge that can't be read (after one retry on a timeout or a 5xx) keeps the
+PRs from its last good read, so a day of 504s neither drops them nor makes
+them new; the run then exits non-zero. Forgejo calls wait up to 120 seconds:
+Codeberg's PR list can take 30.
+
+Each forge is checked only if its token is set:
+
+| Variable | Required | Default | |
+|---|---|---|---|
+| `NEEDS_YOU` | no | `off` | `on`: run this check as well; `only`: run it alone |
+| `GITHUB_TOKEN` | no | | Token for GitHub (scopes below) |
+| `GITHUB_OWNER` | with `GITHUB_TOKEN` | | User or organisation: searches `is:pr is:open author:app/renovate user:<owner>` |
+| `GITLAB_TOKEN` | no | | Token for GitLab |
+| `GITLAB_URL` | no | `https://gitlab.com` | GitLab base URL |
+| `GITLAB_NAMESPACE` | with `GITLAB_TOKEN` | | Group (subgroups included) or user whose projects' MRs are read; only MRs from `renovate/` branches count |
+| `FORGEJO_TOKEN` | no | | Token for Forgejo or Gitea |
+| `FORGEJO_URL` | with `FORGEJO_TOKEN` | | Base URL, e.g. `https://codeberg.org` |
+| `FORGEJO_REPOS` | with `FORGEJO_TOKEN` | | Comma-separated `owner/repo`s; only PRs from `renovate/` branches count |
+| `AUTOMERGE_LABEL` | no | `renovate-automerge` | As above: a PR without it waits for a review |
+| `MANUAL_REVIEW_LABEL` | no | `manual-review` | Label of a PR held for review |
+| `NEEDS_YOU_STATE_FILE` | no | `needs-you-state.json` | State file name in `LOG_DIR` |
+
+The GitHub search covers the PRs of the Mend Renovate app; on GitLab and
+Forgejo, a self-hosted Renovate's PRs are told apart by their `renovate/`
+branch, whoever authored them. A GitLab group's MRs are read in one listing; a
+user namespace has none, so its projects are read one by one.
+
+Tokens, all read-only:
+
+- **GitHub:** a classic token. For public repositories only, one with no
+  scopes is enough; private ones need the `repo` scope. A fine-grained token
+  for the owner's repositories needs Pull requests, Contents and Commit
+  statuses set to read; GitHub lists no fine-grained permission for check
+  runs, so if they come back 403 or 404 on a private repository, use a classic
+  token. The search returns the private repositories the token can read.
+- **GitLab:** a personal, group or project access token with `read_api`.
+- **Forgejo:** a token with `read:repository` and `read:issue`.
+
+For example, in a Kubernetes CronJob alongside the run log checks:
+
+```yaml
+env:
+  - name: NEEDS_YOU
+    value: "on"
+  - name: AUTOMERGE_LABEL
+    value: automerge
+  - name: GITHUB_OWNER
+    value: owner
+  - name: GITLAB_NAMESPACE
+    value: owner
+  - name: FORGEJO_URL
+    value: https://codeberg.org
+  - name: FORGEJO_REPOS
+    value: owner/infra
+  - name: GITHUB_TOKEN
+    valueFrom:
+      secretKeyRef: {name: renovate-alert, key: GITHUB_TOKEN}
+  - name: GITLAB_TOKEN
+    valueFrom:
+      secretKeyRef: {name: renovate-alert, key: GITLAB_TOKEN}
+  - name: FORGEJO_TOKEN
+    valueFrom:
+      secretKeyRef: {name: renovate-alert, key: FORGEJO_TOKEN}
+```
 
 ## Running
 
