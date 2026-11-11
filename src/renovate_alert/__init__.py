@@ -13,6 +13,10 @@ LOG_DIR/alert-state.json and notifies once per problem, as a single Apprise
 digest. Never exits non-zero for a problem it
 reports; a crash here is a bug in this program, not in Renovate. An
 undelivered digest does exit non-zero, so a failed Job shows it.
+
+NEEDS_YOU=on adds the Renovate PRs that need a person, on GitHub, GitLab and
+Forgejo, as a message of their own (needs_you.py); NEEDS_YOU=only runs that
+check alone.
 """
 
 import datetime as dt
@@ -25,6 +29,8 @@ import sys
 import urllib.request
 
 from apprise_notify import notify
+
+from renovate_alert import needs_you
 
 # FORGE_API is the Forgejo/Gitea API base, e.g. https://codeberg.org/api/v1
 # (CODEBERG_API, its first name, still works). Unset: run logs only, no
@@ -46,6 +52,10 @@ LOG_DIR = os.environ.get("LOG_DIR", "/logs")
 # different prefixes; each check then needs its own STATE_FILE.
 LOG_PREFIX = os.environ.get("LOG_PREFIX", "renovate-")
 STATE = os.path.join(LOG_DIR, os.environ.get("STATE_FILE", "alert-state.json"))
+# off: the Renovate checks only; on: those and the PRs that need you; only: the PRs alone.
+NEEDS_YOU = os.environ.get("NEEDS_YOU", "off").lower()
+if NEEDS_YOU not in ("off", "on", "only"):
+    sys.exit("NEEDS_YOU is off, on or only.")
 
 # Days before something counts as stuck. Pending legitimately lasts as long as
 # the longest minimumReleaseAge (30 days); rate-limited items drain at about
@@ -161,6 +171,17 @@ def days(since):
 
 
 def main():
+    failures = []
+    if NEEDS_YOU != "only":
+        failures += check_renovate()
+    if NEEDS_YOU != "off":
+        failures += needs_you.run()
+    if failures:
+        sys.exit("\n".join(failures))
+
+
+def check_renovate():
+    """Run logs, and with FORGE_API the dashboard and PRs; return what failed, for the exit status."""
     try:
         with open(STATE) as f:
             state = json.load(f)
@@ -236,8 +257,7 @@ def main():
     with open(STATE + ".tmp", "w") as f:
         json.dump({"first_seen": current, "alerted": sorted(delivered), "logs_read_until": read_until}, f, indent=1)
     os.replace(STATE + ".tmp", STATE)
-    if not sent:
-        sys.exit("Apprise did not accept the digest; it is retried next run.")
+    return [] if sent else ["Apprise did not accept the digest; it is retried next run."]
 
 
 def check_forge(problems, seen, current):
