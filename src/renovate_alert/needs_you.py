@@ -53,6 +53,9 @@ RETRY_DELAY = 5
 # GitHub check run conclusions that mean red CI. cancelled is left out: a
 # newer run of the same workflow cancels the older one.
 FAILED_CONCLUSIONS = {"failure", "timed_out", "startup_failure"}
+# The same for Actions workflow runs, read when the check runs can't be.
+# action_required: a run waiting for approval never reports a check.
+FAILED_RUN_CONCLUSIONS = FAILED_CONCLUSIONS | {"action_required"}
 # The preset's PR note for a held update; the line is quoted as it stands,
 # without its emoji and bold markup.
 WHY = re.compile(r"^[\W_]*(why this waits for you\b.*)", re.IGNORECASE)
@@ -152,6 +155,23 @@ def stale_dashboards(headers):
     return items
 
 
+def github_failed_checks(api, sha, headers):
+    """The names of the failed check runs on sha.
+
+    A fine-grained token can't read check runs (403, or 404 on a private
+    repository), so then the failed Actions workflow runs are named instead,
+    which its Actions read permission covers.
+    """
+    try:
+        runs = fetch(f"{api}/commits/{sha}/check-runs?per_page=100", headers)["check_runs"]
+        return [run["name"] for run in runs if run["conclusion"] in FAILED_CONCLUSIONS]
+    except urllib.error.HTTPError as e:
+        if e.code not in (403, 404):
+            raise
+    runs = fetch(f"{api}/actions/runs?head_sha={sha}&per_page=100", headers)["workflow_runs"]
+    return [run["name"] for run in runs if run["conclusion"] in FAILED_RUN_CONCLUSIONS]
+
+
 def github():
     """Open PRs by the Renovate app in GITHUB_OWNER's repositories, private ones included, and stale dashboards."""
     headers = {
@@ -167,9 +187,8 @@ def github():
         repo = pr["repository_url"].split("/repos/", 1)[1]
         api = f"{GITHUB_API}/repos/{repo}"
         sha = fetch(f"{api}/pulls/{pr['number']}", headers)["head"]["sha"]
-        runs = fetch(f"{api}/commits/{sha}/check-runs?per_page=100", headers)["check_runs"]
+        failed = github_failed_checks(api, sha, headers)
         statuses = fetch(f"{api}/commits/{sha}/status?per_page=100", headers)["statuses"]
-        failed = [run["name"] for run in runs if run["conclusion"] in FAILED_CONCLUSIONS]
         failed += [status["context"] for status in statuses if status["state"] in ("failure", "error")]
         labels = {label["name"] for label in pr["labels"]}
         items.append(item("GitHub", repo, pr["title"], pr["html_url"], labels, pr["created_at"], pr["body"], failed))

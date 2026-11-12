@@ -250,6 +250,50 @@ def test_github_manual_review_and_failed_checks(forges, monkeypatch):
     assert req.get_header("Authorization") == "Bearer gh-token"
 
 
+@pytest.mark.parametrize("code", [403, 404])
+def test_github_falls_back_to_workflow_runs_when_check_runs_are_unreadable(forges, monkeypatch, code):
+    # A fine-grained token: no permission covers check runs, Actions read covers workflow runs.
+    fake, sent = forges
+    only(monkeypatch, "GitHub")
+    route_github(fake, [github_pr(2), github_pr(3)], statuses={2: [{"context": "ci/build", "state": "failure"}]})
+    for n, runs in (
+        (2, [{"name": "CI", "conclusion": "failure"}, {"name": "Docs", "conclusion": "success"}]),
+        (3, [{"name": "CI", "conclusion": None}, {"name": "Old", "conclusion": "cancelled"}]),
+    ):
+        fake.routes[f"{GH}/repos/owner/app/commits/sha{n}/check-runs?per_page=100"] = code
+        fake.routes[f"{GH}/repos/owner/app/actions/runs?head_sha=sha{n}&per_page=100"] = {
+            "total_count": len(runs),
+            "workflow_runs": runs,
+        }
+    assert ny.run() == []
+    title, body = sent[0]
+    assert title == "Renovate: 1 PR(s) need you, 1 new"
+    assert "  CI failed: CI, ci/build, open 3 days (new)\n  https://github.com/owner/app/pull/2" in body
+
+
+@pytest.mark.parametrize("conclusion", ["timed_out", "startup_failure", "action_required"])
+def test_github_workflow_run_conclusions_that_fail(forges, monkeypatch, conclusion):
+    fake, sent = forges
+    only(monkeypatch, "GitHub")
+    route_github(fake, [github_pr(2)])
+    fake.routes[f"{GH}/repos/owner/app/commits/sha2/check-runs?per_page=100"] = 403
+    fake.routes[f"{GH}/repos/owner/app/actions/runs?head_sha=sha2&per_page=100"] = {
+        "total_count": 1,
+        "workflow_runs": [{"name": "Release", "conclusion": conclusion}],
+    }
+    ny.run()
+    assert "CI failed: Release" in sent[0][1]
+
+
+def test_github_other_check_run_errors_fail_the_forge(forges, monkeypatch):
+    fake, sent = forges
+    only(monkeypatch, "GitHub")
+    route_github(fake, [github_pr(2)])
+    fake.routes[f"{GH}/repos/owner/app/commits/sha2/check-runs?per_page=100"] = 401
+    assert ny.run() == ["GitHub could not be read (HTTP Error 401: error); its PRs are as of the last check."]
+    assert sent == []
+
+
 def test_github_order_and_layout(forges, monkeypatch):
     fake, sent = forges
     only(monkeypatch, "GitHub")
