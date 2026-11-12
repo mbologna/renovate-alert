@@ -7,7 +7,8 @@ log line, and runs that never started left nothing to read.
 
 Reads the Dependency Dashboard and the open PRs through the Forgejo/Gitea API,
 and every Renovate run log in LOG_DIR (written with Renovate's LOG_FILE) since
-the last check. Without FORGE_API it checks the run logs only, for a Renovate
+the last check; a failed run counts only if Renovate did not recover from it
+(to_report). Without FORGE_API it checks the run logs only, for a Renovate
 on another platform (one instance per log prefix, with its own state file). Keeps first-seen dates, and how far the logs have been read, in
 LOG_DIR/alert-state.json and notifies once per problem, as a single Apprise
 digest. Never exits non-zero for a problem it
@@ -166,6 +167,26 @@ def scan_log(path):
     return aborted, exit_error, skipped
 
 
+def to_report(runs, failed_before=False):
+    """The names of the failed runs worth a report, of runs as (name, failed) oldest first.
+
+    A failed run is reported when no later run succeeded (the newest run failed
+    too), or when it is one of two or more failed runs in a row: a single
+    failure that the next run recovered from is a blip, such as a forge timing
+    out once. failed_before says whether the run before the first one failed.
+    """
+    report, streak, length = set(), [], int(failed_before)
+    for name, failed in runs:
+        if failed:
+            streak.append(name)
+            length += 1
+            continue
+        if length >= 2:
+            report.update(streak)
+        streak, length = [], 0
+    return report | set(streak)  # the newest run failed too: nothing recovered from these
+
+
 def days(since):
     return (NOW - dt.datetime.fromisoformat(since)).days
 
@@ -210,10 +231,11 @@ def check_renovate():
     since = state.get("logs_read_until", NOW.timestamp() - RUN_STALE_HOURS * 3600)
     new_logs = [path for path in logs if os.path.getmtime(path) > since]
     # A branch skipped again by each run is one problem, not one per run.
-    aborted, exit_error, limited, skipped = [], [], {}, {}
+    aborted, exit_error, limited, skipped, runs = [], [], {}, {}, []
     for path in new_logs:
         run_aborted, run_exit_error, run_skipped = scan_log(path)
         name = run_name(path)
+        runs.append((name, run_aborted or run_exit_error))
         if run_aborted:
             aborted.append(name)
         if run_exit_error:
@@ -221,6 +243,11 @@ def check_renovate():
         for option, branches in run_skipped.items():
             limited.setdefault(option, []).append(name)
             skipped.setdefault(option, set()).update(branches)
+    # Only failures the runs did not recover from (to_report).
+    failed_before = state.get("last_run_failed", False)
+    reported = to_report(runs, failed_before)
+    aborted = [name for name in aborted if name in reported]
+    exit_error = [name for name in exit_error if name in reported]
     if aborted:
         problems["aborted"] = (
             f"Renovate run {', '.join(aborted)} aborted on an external host error (a registry or the forge "
@@ -254,8 +281,18 @@ def check_renovate():
     # resolved ones means a recurrence alerts again. An undelivered digest also
     # keeps the logs unread, so the next run reports what was in them.
     read_until = max((os.path.getmtime(path) for path in new_logs), default=since) if sent else since
+    last_failed = runs[-1][1] if runs and sent else failed_before
     with open(STATE + ".tmp", "w") as f:
-        json.dump({"first_seen": current, "alerted": sorted(delivered), "logs_read_until": read_until}, f, indent=1)
+        json.dump(
+            {
+                "first_seen": current,
+                "alerted": sorted(delivered),
+                "logs_read_until": read_until,
+                "last_run_failed": last_failed,
+            },
+            f,
+            indent=1,
+        )
     os.replace(STATE + ".tmp", STATE)
     return [] if sent else ["Apprise did not accept the digest; it is retried next run."]
 
