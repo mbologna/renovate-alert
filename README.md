@@ -104,7 +104,9 @@ A PR needs you when:
   for you" (emoji and bold markup aside), that line is quoted under it;
 - **its CI failed:** a check on its head commit failed. GitHub: a check run
   concluded `failure`, `timed_out` or `startup_failure`, or a commit status is
-  `failure` or `error`. GitLab: the head pipeline failed; the failed jobs that
+  `failure` or `error`; with a token that can't read check runs, a GitHub
+  Actions workflow run concluded one of those or `action_required`, and the
+  workflow is named. GitLab: the head pipeline failed; the failed jobs that
   aren't allowed to fail are named. Forgejo: the combined commit status is
   `failure` or `error`.
 
@@ -162,13 +164,14 @@ user namespace has none, so its projects are read one by one.
 
 Tokens, all read-only:
 
-- **GitHub:** a classic token. For public repositories only, one with no
-  scopes is enough; private ones need the `repo` scope. A fine-grained token
-  for the owner's repositories needs Pull requests, Issues, Contents and
-  Commit statuses set to read; GitHub lists no fine-grained permission for
-  check runs, so if they come back 403 or 404 on a private repository, use a
-  classic token. The search returns the private repositories the token can
-  read.
+- **GitHub:** a fine-grained token for the owner's repositories, private
+  ones included, with Pull requests, Issues, Contents, Commit statuses and
+  Actions set to read. Fine-grained tokens can't read check runs (403, or 404
+  on a private repository), so the check then reads the head commit's GitHub
+  Actions workflow runs instead, which the Actions permission covers. A
+  classic token works too: one with no scopes for public repositories only,
+  with the `repo` scope for private ones. The search returns the private
+  repositories the token can read.
 - **GitLab:** a personal, group or project access token with `read_api`.
 - **Forgejo:** a token with `read:repository` and `read:issue`.
 
