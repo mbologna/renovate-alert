@@ -13,6 +13,25 @@ GH = "https://api.github.com"
 GL = "https://gitlab.example/api/v4"
 FJ = "https://forgejo.example/api/v1"
 SEARCH = f"{GH}/search/issues?q=is%3Apr%20is%3Aopen%20author%3Aapp/renovate%20user%3Aowner&per_page=100&page=1"
+DASHBOARD_SEARCH = (
+    f"{GH}/search/issues?q=is%3Aissue%20is%3Aopen%20in%3Atitle%20%22Renovate%20Dependency%20Dashboard%22"
+    "%20user%3Aowner&per_page=100&page=1"
+)
+DASHBOARD_TITLE = "🤖 Renovate Dependency Dashboard"
+AWAITING_BODY = """This issue lists Renovate updates and detected dependencies.
+
+## Awaiting Schedule
+
+The following updates are awaiting their schedule. To get an update now, click on a checkbox below.
+
+ - [ ] <!-- unschedule-branch=renovate/ruff-0.x -->chore(deps): update ruff to v0.9.1
+
+## Detected Dependencies
+"""
+QUIET_BODY = """This issue lists Renovate updates and detected dependencies.
+
+## Detected Dependencies
+"""
 # A Tuesday: no Monday reminder unless a test moves NOW.
 TUESDAY = dt.datetime(2026, 11, 10, 13, 0, tzinfo=dt.UTC)
 MANUAL_BODY = """This PR contains the following updates:
@@ -92,9 +111,23 @@ def github_pr(number, repo="owner/app", labels=("dependencies", "automerge"), da
     }
 
 
-def route_github(fake, prs, checks=None, statuses=None):
-    """The search finds prs; checks and statuses map PR number to the head commit's check runs and statuses."""
+def dashboard(repo="owner/app", title=DASHBOARD_TITLE, body=AWAITING_BODY, days=9):
+    return {
+        "number": 1,
+        "title": title,
+        "html_url": f"https://github.com/{repo}/issues/1",
+        "repository_url": f"{GH}/repos/{repo}",
+        "created_at": "2025-01-06T03:00:00Z",
+        "updated_at": ago(days).replace("+00:00", "Z"),
+        "body": body,
+    }
+
+
+def route_github(fake, prs, checks=None, statuses=None, dashboards=()):
+    """The searches find prs and dashboards; checks and statuses map PR number to the head commit's check runs and
+    statuses."""
     fake.routes[SEARCH] = {"total_count": len(prs), "incomplete_results": False, "items": prs}
+    fake.routes[DASHBOARD_SEARCH] = {"total_count": len(dashboards), "incomplete_results": False, "items": dashboards}
     for pr in prs:
         if pr["draft"]:
             continue  # never asked about
@@ -231,6 +264,76 @@ def test_github_order_and_layout(forges, monkeypatch):
         "  manual review, open 1 day (new)\n"
         "  https://github.com/owner/app/pull/1"
     )
+
+
+def test_github_stale_dashboard(forges, monkeypatch):
+    fake, sent = forges
+    only(monkeypatch, "GitHub")
+    dashboards = [
+        dashboard("owner/app"),  # awaiting schedule, 9 days without a change: flagged
+        dashboard("owner/quiet", body=QUIET_BODY, days=60),  # nothing awaiting: a quiet repo, not flagged
+        dashboard("owner/fresh", days=2),  # awaiting, but visited 2 days ago: not flagged
+        dashboard("owner/other", title="Renovate Dependency Dashboard (old)"),  # the search also finds this
+        dashboard("owner/null", body=None, days=30),
+    ]
+    route_github(fake, [github_pr(1, labels=("manual-review",))], dashboards=dashboards)
+    assert ny.run() == []
+    title, body = sent[0]
+    assert title == "Renovate: 2 item(s) need you, 2 new"
+    assert body == (
+        "GitHub owner/app\n"
+        f"- {DASHBOARD_TITLE}\n"
+        "  Renovate hasn't visited in 9 days (updates awaiting schedule) (new)\n"
+        "  https://github.com/owner/app/issues/1\n"
+        "- chore(deps): update thing 1\n"
+        "  manual review, open 3 days (new)\n"
+        "  https://github.com/owner/app/pull/1"
+    )
+
+    # A day later it is still unvisited: the growing count is no news.
+    monkeypatch.setattr(ny, "NOW", TUESDAY + dt.timedelta(days=1))
+    ny.run()
+    assert len(sent) == 1
+    assert json.load(open(ny.STATE))["sent"] == [
+        "https://github.com/owner/app/issues/1 not visited by Renovate",
+        "https://github.com/owner/app/pull/1 manual review",
+    ]
+
+    # Renovate visits and opens the PRs: the dashboard drops off; the next miss is news again.
+    monkeypatch.setattr(ny, "NOW", TUESDAY)
+    route_github(fake, [github_pr(1, labels=("manual-review",))], dashboards=[dashboard(days=0)])
+    ny.run()
+    route_github(fake, [github_pr(1, labels=("manual-review",))], dashboards=[dashboard(days=8)])
+    ny.run()
+    assert len(sent) == 2
+    assert "Renovate hasn't visited in 8 days (updates awaiting schedule) (new)" in sent[1][1]
+
+
+@pytest.mark.parametrize(
+    ("days", "stale_days", "flagged"),
+    [(8, 8, True), (7, 8, False), (12, 14, False), (400, 0, False)],
+)
+def test_github_dashboard_stale_days(forges, monkeypatch, days, stale_days, flagged):
+    fake, sent = forges
+    only(monkeypatch, "GitHub")
+    monkeypatch.setattr(ny, "DASHBOARD_STALE_DAYS", stale_days)
+    route_github(fake, [], dashboards=[dashboard(days=days)])
+    ny.run()
+    assert bool(sent) == flagged
+    if not stale_days:  # 0 turns the check off: no search at all
+        assert all("is%3Aissue" not in req.full_url for req, _ in fake.requests)
+
+
+def test_github_dashboard_title_is_configurable(forges, monkeypatch):
+    fake, sent = forges
+    only(monkeypatch, "GitHub")
+    monkeypatch.setattr(ny, "DASHBOARD_TITLE", "Renovate Dependency Dashboard")
+    route_github(
+        fake, [], dashboards=[dashboard("owner/a"), dashboard("owner/b", title="Renovate Dependency Dashboard")]
+    )
+    ny.run()
+    assert "GitHub owner/b\n" in sent[0][1]
+    assert "owner/a" not in sent[0][1]
 
 
 def test_gitlab_user_namespace_failed_pipeline(forges, monkeypatch):

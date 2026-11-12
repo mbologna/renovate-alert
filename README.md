@@ -47,7 +47,8 @@ so the failure is visible.
 
 A second, optional check (`NEEDS_YOU`, below) lists the Renovate PRs that
 need a person, on GitHub, GitLab and Forgejo: the ones held for manual review,
-and the ones whose CI failed.
+and the ones whose CI failed. On GitHub it also lists the repositories the
+Renovate app has stopped visiting.
 
 ## Configuration
 
@@ -98,10 +99,22 @@ A PR needs you when:
 
 Pending or running CI doesn't count, nor do draft PRs.
 
+On GitHub, a repository is listed too when **Renovate hasn't visited it**: its
+Dependency Dashboard (the open issue titled `DASHBOARD_TITLE`) has an
+"Awaiting Schedule" section and hasn't changed in `DASHBOARD_STALE_DAYS`. The
+hosted Renovate app visits quiet repositories irregularly. A visit in the
+schedule window opens the updates awaiting it, which changes the dashboard, so
+one that still lists them after 8 days means a whole weekly window passed with
+no visit. A quiet repository with nothing awaiting rightly stays unchanged for
+months, and is not listed. The default suits schedules that come round at
+least weekly; raise `DASHBOARD_STALE_DAYS` for longer ones, or set it to `0` to
+turn this off. The entry links the dashboard and says how many days it's been.
+
 The message is sent when something new appears: a PR, or a new reason for one
 already listed (its CI going red, say). A PR that merely stays open is not
-repeated, and one that goes away (merged, CI fixed) sends nothing; if it comes
-back, it is new again. On Mondays the full list goes out as a reminder, if it
+repeated, nor is a dashboard that goes another day without a visit. One that
+goes away (merged, CI fixed, visited) sends nothing; if it comes back, it is
+new again. On Mondays the full list goes out as a reminder, if it
 isn't empty. What was last sent is kept in `LOG_DIR/needs-you-state.json`,
 keyed by PR URL and reason.
 
@@ -125,10 +138,14 @@ Each forge is checked only if its token is set:
 | `FORGEJO_REPOS` | with `FORGEJO_TOKEN` | | Comma-separated `owner/repo`s; only PRs from `renovate/` branches count |
 | `AUTOMERGE_LABEL` | no | `renovate-automerge` | As above: a PR without it waits for a review |
 | `MANUAL_REVIEW_LABEL` | no | `manual-review` | Label of a PR held for review |
+| `DASHBOARD_TITLE` | no | `🤖 Renovate Dependency Dashboard` | Exact title of the GitHub Dependency Dashboard issues |
+| `DASHBOARD_STALE_DAYS` | no | `8` | Days a GitHub dashboard with updates awaiting schedule may go unchanged; `0`: off |
 | `NEEDS_YOU_STATE_FILE` | no | `needs-you-state.json` | State file name in `LOG_DIR` |
 
-The GitHub search covers the PRs of the Mend Renovate app; on GitLab and
-Forgejo, a self-hosted Renovate's PRs are told apart by their `renovate/`
+The GitHub search covers the PRs of the Mend Renovate app. The dashboards
+come from a second search, `is:issue is:open in:title "Renovate Dependency
+Dashboard" user:<owner>`, which keeps only the issues titled exactly
+`DASHBOARD_TITLE`. On GitLab and Forgejo, a self-hosted Renovate's PRs are told apart by their `renovate/`
 branch, whoever authored them. A GitLab group's MRs are read in one listing; a
 user namespace has none, so its projects are read one by one.
 
@@ -136,10 +153,11 @@ Tokens, all read-only:
 
 - **GitHub:** a classic token. For public repositories only, one with no
   scopes is enough; private ones need the `repo` scope. A fine-grained token
-  for the owner's repositories needs Pull requests, Contents and Commit
-  statuses set to read; GitHub lists no fine-grained permission for check
-  runs, so if they come back 403 or 404 on a private repository, use a classic
-  token. The search returns the private repositories the token can read.
+  for the owner's repositories needs Pull requests, Issues, Contents and
+  Commit statuses set to read; GitHub lists no fine-grained permission for
+  check runs, so if they come back 403 or 404 on a private repository, use a
+  classic token. The search returns the private repositories the token can
+  read.
 - **GitLab:** a personal, group or project access token with `read_api`.
 - **Forgejo:** a token with `read:repository` and `read:issue`.
 

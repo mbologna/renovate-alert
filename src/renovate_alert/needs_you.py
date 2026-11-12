@@ -5,7 +5,10 @@ worth a message. Reads the open Renovate PRs on GitHub, GitLab and Forgejo
 (each forge only if its token is set) and sends one Apprise message listing
 the ones that need you, grouped by forge and repository. A PR needs you if it
 carries MANUAL_REVIEW_LABEL or lacks AUTOMERGE_LABEL, or if a check on its
-head commit failed; pending checks and draft PRs don't count.
+head commit failed; pending checks and draft PRs don't count. On GitHub it
+also lists a repository whose Dependency Dashboard still has updates awaiting
+their schedule after DASHBOARD_STALE_DAYS without a change: the Renovate app
+has not visited it for a whole schedule window.
 
 The message goes out when something new appears, and again every Monday as a
 reminder while the list is not empty. What was last sent is kept in
@@ -37,6 +40,8 @@ FORGEJO_REPOS = [repo.strip() for repo in os.environ.get("FORGEJO_REPOS", "").sp
 APPRISE_URL = os.environ.get("APPRISE_URL", "")
 AUTOMERGE_LABEL = os.environ.get("AUTOMERGE_LABEL", "renovate-automerge")
 MANUAL_REVIEW_LABEL = os.environ.get("MANUAL_REVIEW_LABEL", "manual-review")
+DASHBOARD_TITLE = os.environ.get("DASHBOARD_TITLE") or "🤖 Renovate Dependency Dashboard"
+DASHBOARD_STALE_DAYS = int(os.environ.get("DASHBOARD_STALE_DAYS") or 8)
 STATE = os.path.join(os.environ.get("LOG_DIR", "/logs"), os.environ.get("NEEDS_YOU_STATE_FILE", "needs-you-state.json"))
 
 # Codeberg's PR list takes up to 30 s and answers 504 at times: Forgejo calls
@@ -51,6 +56,9 @@ FAILED_CONCLUSIONS = {"failure", "timed_out", "startup_failure"}
 # The preset's PR note for a held update; the line is quoted as it stands,
 # without its emoji and bold markup.
 WHY = re.compile(r"^[\W_]*(why this waits for you\b.*)", re.IGNORECASE)
+AWAITING = re.compile(r"^## Awaiting Schedule\s*$", re.MULTILINE)
+# The key reason of a stale dashboard; the message says how many days.
+NOT_VISITED = "not visited by Renovate"
 
 NOW = dt.datetime.now(dt.UTC)
 
@@ -104,21 +112,54 @@ def item(forge, repo, title, url, labels, created, body, failed):
     return entry | {"reasons": reasons, "note": note}
 
 
+def search(query, headers):
+    """Every issue or PR the GitHub search finds."""
+    query = urllib.parse.quote(query)
+    found, page = [], 1
+    while True:
+        batch = fetch(f"{GITHUB_API}/search/issues?q={query}&per_page=100&page={page}", headers)
+        found += batch["items"]
+        if len(batch["items"]) < 100 or len(found) >= batch["total_count"]:
+            return found
+        page += 1
+
+
+def days_since(timestamp):
+    return (NOW - dt.datetime.fromisoformat(timestamp)).days
+
+
+def stale_dashboards(headers):
+    """Dashboards with updates awaiting their schedule and no change in DASHBOARD_STALE_DAYS.
+
+    The Renovate app visits a quiet repository irregularly. On its visit in a
+    schedule window it opens the PRs awaiting that window, which changes the
+    dashboard; a dashboard that still lists them after a whole window means no
+    visit. One with nothing awaiting may rightly stay unchanged for months.
+    """
+    if DASHBOARD_STALE_DAYS <= 0:
+        return []
+    found = search(f'is:issue is:open in:title "Renovate Dependency Dashboard" user:{GITHUB_OWNER}', headers)
+    items = []
+    for issue in found:
+        if issue["title"] != DASHBOARD_TITLE or not AWAITING.search(issue["body"] or ""):
+            continue
+        if days_since(issue["updated_at"]) < DASHBOARD_STALE_DAYS:
+            continue
+        repo = issue["repository_url"].split("/repos/", 1)[1]
+        entry = {"forge": "GitHub", "repo": repo, "title": issue["title"], "url": issue["html_url"]}
+        dates = {"created": issue["created_at"], "updated": issue["updated_at"]}
+        items.append(entry | dates | {"reasons": [NOT_VISITED], "note": ""})
+    return items
+
+
 def github():
-    """Open PRs by the Renovate app in GITHUB_OWNER's repositories, private ones included."""
+    """Open PRs by the Renovate app in GITHUB_OWNER's repositories, private ones included, and stale dashboards."""
     headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    query = urllib.parse.quote(f"is:pr is:open author:app/renovate user:{GITHUB_OWNER}")
-    prs, page = [], 1
-    while True:
-        found = fetch(f"{GITHUB_API}/search/issues?q={query}&per_page=100&page={page}", headers)
-        prs += found["items"]
-        if len(found["items"]) < 100 or len(prs) >= found["total_count"]:
-            break
-        page += 1
+    prs = search(f"is:pr is:open author:app/renovate user:{GITHUB_OWNER}", headers)
     items = []
     for pr in prs:
         if pr.get("draft"):
@@ -132,7 +173,7 @@ def github():
         failed += [status["context"] for status in statuses if status["state"] in ("failure", "error")]
         labels = {label["name"] for label in pr["labels"]}
         items.append(item("GitHub", repo, pr["title"], pr["html_url"], labels, pr["created_at"], pr["body"], failed))
-    return items
+    return items + stale_dashboards(headers)
 
 
 def gitlab():
@@ -211,8 +252,13 @@ def keys(entry):
     return [f"{entry['url']} {reason}" for reason in entry["reasons"]]
 
 
-def age(entry):
-    return (NOW - dt.datetime.fromisoformat(entry["created"])).days
+def status(entry):
+    """The entry's reasons and age, as listed."""
+    if "updated" in entry:  # a stale dashboard
+        days = days_since(entry["updated"])
+        return f"Renovate hasn't visited in {days} days (updates awaiting schedule)"
+    days = days_since(entry["created"])
+    return f"{'; '.join(entry['reasons'])}, open {days} day{'' if days == 1 else 's'}"
 
 
 def render(items, new):
@@ -222,10 +268,9 @@ def render(items, new):
             group = entry["forge"], entry["repo"]
             lines += [""] if lines else []
             lines.append(f"{entry['forge']} {entry['repo']}")
-        days = age(entry)
         flag = " (new)" if new & set(keys(entry)) else ""
         lines.append(f"- {entry['title']}")
-        lines.append(f"  {'; '.join(entry['reasons'])}, open {days} day{'' if days == 1 else 's'}{flag}")
+        lines.append(f"  {status(entry)}{flag}")
         if entry["note"]:
             lines.append(f"  {entry['note']}")
         lines.append(f"  {entry['url']}")
@@ -258,14 +303,15 @@ def run():
     today = NOW.date().isoformat()
     reminder = NOW.weekday() == 0 and state.get("last_sent") != today
     sent, delivered = sent_before & current, True
+    what = "item(s)" if any("updated" in entry for entry in items) else "PR(s)"
     if items and (new or reminder):
         fresh = sum(1 for entry in items if new & set(keys(entry)))
-        title = f"Renovate: {len(items)} PR(s) need you" + (f", {fresh} new" if fresh else " (Monday reminder)")
+        title = f"Renovate: {len(items)} {what} need you" + (f", {fresh} new" if fresh else " (Monday reminder)")
         body = render(items, new) + "".join(f"\n\n{error}" for error in errors)
         delivered = notify(APPRISE_URL, title, body, "info")
         if delivered:
             sent, state["last_sent"] = current, today
-    print(f"{len(items)} PR(s) need you, {len(new)} new reason(s)", *(e["url"] for e in items), *errors, sep="\n")
+    print(f"{len(items)} {what} need you, {len(new)} new reason(s)", *(e["url"] for e in items), *errors, sep="\n")
 
     state.update(items=read, sent=sorted(sent))
     with open(STATE + ".tmp", "w") as f:
