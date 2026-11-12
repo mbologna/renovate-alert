@@ -235,20 +235,94 @@ def test_error_specific_exit_code(env):
 
 def test_reads_every_log_since_the_last_check_including_rotated(env):
     log_dir, sent, _ = env
-    # An earlier run, already gzipped by the next one, aborted; the newest is clean.
+    # Two earlier runs, already gzipped by the next one, aborted; the newest is clean.
     write_log(log_dir, ABORTED_LOG, age_hours=12, name="renovate-20261021-013000.log.gz")
     write_log(
         log_dir,
-        "Branches limit reached\nReached branch limit - skipping branch creation\n",
+        "Branches limit reached\nReached branch limit - skipping branch creation\n" + ABORTED_LOG,
         age_hours=2,
         name="renovate-20261021-133000.log.gz",
     )
     newest = write_log(log_dir, " INFO: Repository finished\n", name="renovate-20261022-013000.log")
     ra.main()
     body = sent[0][1]
-    assert "Renovate run renovate-20261021-013000 aborted" in body
+    assert "Renovate run renovate-20261021-013000, renovate-20261021-133000 aborted" in body
     assert "Run renovate-20261021-133000 hit branchConcurrentLimit and skipped 1" in body
     assert json.load(open(ra.STATE))["logs_read_until"] == os.path.getmtime(newest)
+
+
+# A forge that failed once: Renovate 44's pretty log of a run whose git
+# ls-remote timed out, which exits non-zero although the next run is fine.
+LS_REMOTE_LOG = """ INFO: Repository started (repository=owner/infra)
+ WARN: Error fetching remote refs (repository=owner/infra)
+       "err": {"message": "Command failed: git ls-remote --heads https://forge.example/owner/infra.git"}
+ ERROR: Repository has unknown error (repository=owner/infra)
+ INFO: Repository finished (repository=owner/infra)
+       "result": "error"
+ INFO: Renovate is exiting with a non-zero code due to the following logged errors
+"""
+CLEAN_LOG = """ INFO: Repository started (repository=owner/infra)
+ INFO: Repository finished (repository=owner/infra)
+       "result": "done"
+"""
+
+
+def run_logs(log_dir, *texts, name="renovate-20261112-{:02d}1500.log"):
+    """Write one run log per text, oldest first, an hour apart."""
+    for n, text in enumerate(texts):
+        write_log(log_dir, text, age_hours=len(texts) - n, name=name.format(n))
+
+
+def test_failed_run_a_later_run_recovered_from_is_not_reported(env):
+    log_dir, sent, _ = env
+    run_logs(log_dir, LS_REMOTE_LOG, CLEAN_LOG, CLEAN_LOG)
+    ra.main()
+    assert "exited with an error" not in sent[0][1]  # the dashboard problem is still sent
+    assert json.load(open(ra.STATE))["last_run_failed"] is False
+
+
+def test_failed_newest_run_is_reported(env):
+    log_dir, sent, _ = env
+    run_logs(log_dir, CLEAN_LOG, LS_REMOTE_LOG)
+    ra.main()
+    assert "Renovate run renovate-20261112-011500 exited with an error." in sent[0][1]
+    assert json.load(open(ra.STATE))["last_run_failed"] is True
+
+
+def test_two_failed_runs_in_a_row_are_reported_though_a_later_run_recovered(env):
+    log_dir, sent, _ = env
+    run_logs(log_dir, LS_REMOTE_LOG, CLEAN_LOG, LS_REMOTE_LOG, ABORTED_LOG, CLEAN_LOG)
+    ra.main()
+    body = sent[0][1]
+    assert "Renovate run renovate-20261112-021500 exited with an error." in body  # not 001500: recovered
+    assert "Renovate run renovate-20261112-031500 aborted" in body
+
+
+def test_failed_newest_run_of_the_last_check_counts_towards_a_streak(env):
+    log_dir, sent, _ = env
+    write_log(log_dir, ABORTED_LOG, age_hours=3, name="renovate-20261111-001500.log")
+    ra.main()
+    assert "renovate-20261111-001500 aborted" in sent[0][1]
+    # The next check reads a failure the run after it recovered from: the second in a row.
+    run_logs(log_dir, LS_REMOTE_LOG, CLEAN_LOG)
+    ra.main()
+    assert "Renovate run renovate-20261112-001500 exited with an error." in sent[1][1]
+
+
+@pytest.mark.parametrize(
+    "runs,failed_before,reported",
+    [
+        ([], True, set()),
+        ([("a", False)], False, set()),
+        ([("a", True)], False, {"a"}),
+        ([("a", True), ("b", False)], False, set()),
+        ([("a", True), ("b", False)], True, {"a"}),
+        ([("a", True), ("b", True), ("c", False), ("d", True), ("e", False)], False, {"a", "b"}),
+        ([("a", True), ("b", False), ("c", True)], False, {"c"}),
+    ],
+)
+def test_to_report(runs, failed_before, reported):
+    assert ra.to_report(runs, failed_before) == reported
 
 
 def test_each_log_is_read_once(env):

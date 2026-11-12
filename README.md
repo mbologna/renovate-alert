@@ -32,14 +32,25 @@ All of these happened without a single error anywhere:
   within `OPEN_AUTOMERGE_DAYS`.
 
 Every run log written since the previous check is read, current (`.log`) and
-rotated (`.log.gz`) alike, so a failed run is caught even if later runs
-succeeded. Each log is read once: the check remembers the newest modification
-time it has read, and the first check (no state yet) looks back
-`RUN_STALE_HOURS`. Rotating with `gzip` keeps the modification time, so a
+rotated (`.log.gz`) alike. Each log is read once: the check remembers the
+newest modification time it has read, and the first check (no state yet) looks
+back `RUN_STALE_HOURS`. Rotating with `gzip` keeps the modification time, so a
 compressed log is not read again.
 
+A failed run (aborted or failed, above) is reported only when Renovate did not
+recover from it:
+
+- the newest run failed too, so no later run succeeded; or
+- it is one of two or more failed runs in a row, even if a later run
+  succeeded. The newest run of the previous check counts towards the streak.
+
+A single failure that the next run recovered from, such as one `git
+ls-remote` to the forge timing out, is not reported. Neither is a Renovate
+that fails every other run, as long as the newest run succeeds; one that keeps
+failing is reported by the first check after its failures start.
+
 Each problem is reported once, and again only if it goes away and comes back:
-a run failure counts as gone once a check reads only clean runs. The first time
+a run failure counts as gone once a check reads none worth a report. The first time
 each update was seen, how far the logs have been read, and what has been
 reported, are kept in `LOG_DIR/alert-state.json`. A digest that Apprise doesn't
 accept is retried on the next run, logs included, and that run exits non-zero
