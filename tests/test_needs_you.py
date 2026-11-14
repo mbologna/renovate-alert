@@ -1,3 +1,4 @@
+import base64
 import contextlib
 import datetime as dt
 import io
@@ -53,8 +54,20 @@ class Responses:
         self.answers = list(answers)
 
 
+class Reply(io.BytesIO):
+    """A JSON answer with response headers."""
+
+    def __init__(self, answer, headers=None):
+        super().__init__(json.dumps(answer).encode())
+        self.headers = headers or {}
+
+
 class Forges:
-    """Stands in for urlopen: each URL answers with JSON, or with an HTTP error code."""
+    """Stands in for urlopen: each URL answers with JSON, or with an HTTP error code.
+
+    An answer that is a function is called with the request, for URLs such as
+    GitLab's GraphQL endpoint that answer by what is posted.
+    """
 
     def __init__(self):
         self.routes = {}
@@ -67,11 +80,13 @@ class Forges:
         answer = self.routes[req.full_url]
         if isinstance(answer, Responses):
             answer = answer.answers.pop(0)
+        if callable(answer):
+            answer = answer(req)
         if isinstance(answer, int):
             raise urllib.error.HTTPError(req.full_url, answer, "error", {}, None)
         if isinstance(answer, Exception):
             raise answer
-        return contextlib.nullcontext(io.BytesIO(json.dumps(answer).encode()))
+        return contextlib.nullcontext(answer if isinstance(answer, Reply) else Reply(answer))
 
 
 @pytest.fixture
@@ -646,3 +661,426 @@ def test_failures_from_both_checks_fail_the_run(logs, monkeypatch):
     monkeypatch.setattr(ny, "run", lambda: ["GitLab could not be read"])
     with pytest.raises(SystemExit, match="digest undelivered\nGitLab could not be read"):
         ra.main()
+
+
+# The optional checks. They add entries to the same message, with the same rules.
+
+GRAPHQL = "https://gitlab.example/api/graphql"
+TOKEN_SELF = f"{GL}/personal_access_tokens/self"
+USER_NS = "gid://gitlab/Namespaces::UserNamespace/42"
+GIB = 1024**3
+
+
+def route_usage(fake, minutes=0, storage=1 * GIB, registry=0, namespace_id=USER_NS, scopes=("api",)):
+    """GitLab answers the token's details and both GraphQL queries; minutes is this month's use."""
+    route_gitlab(fake)
+    fake.routes[TOKEN_SELF] = {"name": "alerts", "scopes": list(scopes), "expires_at": None}
+    month = ny.NOW.date().replace(day=1).isoformat()
+
+    def graphql(req):
+        body = json.loads(req.data)
+        if "ciMinutesUsage" in body["query"]:
+            assert body["variables"] == {"id": namespace_id, "month": month}
+            nodes = [{"monthIso8601": month, "minutes": minutes}]
+            return {"data": {"ciMinutesUsage": {"nodes": nodes}}}
+        assert body["variables"] == {"path": "owner"}
+        stats = {"storageSize": float(storage), "containerRegistrySize": float(registry)}
+        return {"data": {"namespace": {"id": namespace_id, "rootStorageStatistics": stats}}}
+
+    fake.routes[GRAPHQL] = graphql
+
+
+@pytest.fixture
+def usage(forges, monkeypatch):
+    only(monkeypatch, "GitLab")
+    monkeypatch.setattr(ny, "GITLAB_USAGE", True)
+    return forges
+
+
+def test_gitlab_usage_minutes_and_storage(usage):
+    fake, sent = usage
+    # 9 days and 13 hours into a 30-day month: 150 minutes project to 471.
+    route_usage(fake, minutes=150 + 150, storage=4.5 * GIB, registry=4 * GIB)
+    assert ny.run() == []
+    title, body = sent[0]
+    assert title == "Renovate: 2 item(s) need you, 2 new"
+    assert body == (
+        "GitLab owner usage quotas\n"
+        "- CI minutes: 300 of 400 used (75%), 943 projected by month end (236%)\n"
+        "  CI minutes over 75%; CI minutes projected over 100% (new)\n"
+        "  https://gitlab.example/-/profile/usage_quotas#pipelines-quota-tab\n"
+        "- Storage: 4.5 GiB of 5 GiB (90%), container registry 4.0 GiB\n"
+        "  storage over 80% (new)\n"
+        "  https://gitlab.example/-/profile/usage_quotas#storage-quota-tab"
+    )
+    graphql = next(req for req, _ in fake.requests if req.full_url == GRAPHQL)
+    assert graphql.get_header("Authorization") == "Bearer gl-token"
+
+    # The numbers grow the next day, but the reasons are the same: no news.
+    route_usage(fake, minutes=320, storage=4.6 * GIB)
+    ny.run()
+    assert len(sent) == 1
+
+
+@pytest.mark.parametrize(
+    ("minutes", "reasons"),
+    [
+        (100, []),  # 25%, 314 projected (79%)
+        (150, ["CI minutes projected over 100%"]),  # 38%, 471 projected
+        (300, ["CI minutes over 75%", "CI minutes projected over 100%"]),
+    ],
+)
+def test_gitlab_minutes_thresholds(usage, minutes, reasons):
+    fake, sent = usage
+    route_usage(fake, minutes=minutes)
+    ny.run()
+    assert json.load(open(ny.STATE))["sent"] == [
+        f"https://gitlab.example/-/profile/usage_quotas#pipelines-quota-tab {reason}" for reason in reasons
+    ]
+
+
+def test_gitlab_minutes_thresholds_are_configurable(usage, monkeypatch):
+    fake, sent = usage
+    for name, value in {
+        "GITLAB_MINUTES_QUOTA": 1000,
+        "GITLAB_MINUTES_WARN": 50,
+        "GITLAB_MINUTES_PROJECTED_WARN": 200,
+        "GITLAB_STORAGE_LIMIT_GIB": 10,
+        "GITLAB_STORAGE_WARN": 40,
+    }.items():
+        monkeypatch.setattr(ny, name, value)
+    route_usage(fake, minutes=600, storage=4.5 * GIB)
+    ny.run()
+    assert (
+        "CI minutes: 600 of 1000 used (60%), 1886 projected by month end (189%)\n  CI minutes over 50% (new)"
+        in (sent[0][1])
+    )
+    assert "Storage: 4.5 GiB of 10 GiB (45%), container registry 0.0 GiB\n  storage over 40%" in sent[0][1]
+
+
+def test_gitlab_minutes_not_projected_early_in_the_month(usage, monkeypatch, capsys):
+    fake, sent = usage
+    monkeypatch.setattr(ny, "NOW", dt.datetime(2026, 11, 3, 13, 0, tzinfo=dt.UTC))
+    route_usage(fake, minutes=60)  # would project to 677
+    ny.run()
+    assert sent == []
+    assert "CI minutes: 60 of 400 used (15%)\n" in capsys.readouterr().out
+
+
+def test_gitlab_group_namespace_usage_link(usage):
+    fake, sent = usage
+    route_usage(fake, storage=5 * GIB, namespace_id="gid://gitlab/Group/7")
+    ny.run()
+    assert "https://gitlab.example/groups/owner/-/usage_quotas#storage-quota-tab" in sent[0][1]
+
+
+def test_gitlab_usage_needs_read_api(usage, capsys):
+    fake, sent = usage
+    route_usage(fake, minutes=400, scopes=("read_user", "read_repository"))
+    assert ny.run() == []
+    assert sent == []
+    assert all(req.full_url != GRAPHQL for req, _ in fake.requests)
+    assert "GITLAB_TOKEN has no read_api scope" in capsys.readouterr().out
+
+
+def test_gitlab_usage_graphql_refused(usage, capsys):
+    fake, sent = usage
+    route_usage(fake)
+    fake.routes[TOKEN_SELF] = 404  # not a personal access token: GraphQL decides
+    fake.routes[GRAPHQL] = 403
+    assert ny.run() == []
+    assert "GITLAB_TOKEN needs the read_api scope" in capsys.readouterr().out
+
+
+def test_gitlab_usage_errors_keep_the_last_read(usage):
+    fake, sent = usage
+    route_usage(fake, storage=5 * GIB)
+    ny.run()
+    fake.routes[GRAPHQL] = lambda req: {"errors": [{"message": "Internal server error"}]}
+    assert ny.run() == ["GitLab usage could not be read (Internal server error); its entries are as of the last check."]
+    assert len(sent) == 1
+    assert json.load(open(ny.STATE))["sent"] == [
+        "https://gitlab.example/-/profile/usage_quotas#storage-quota-tab storage over 80%"
+    ]
+
+
+@pytest.fixture
+def expiry(forges, monkeypatch):
+    only(monkeypatch, "GitHub", "GitLab")
+    monkeypatch.setattr(ny, "TOKEN_EXPIRY", True)
+    fake, sent = forges
+    route_github(fake, [], dashboards=[])
+    route_gitlab(fake)
+    return forges
+
+
+@pytest.mark.parametrize(
+    ("github", "gitlab", "listed"),
+    [
+        ("2026-11-24 10:00:00 UTC", "2026-12-10", ["GITHUB_TOKEN expires 2026-11-24", "GITLAB_TOKEN (alerts)"]),
+        ("2026-12-11 08:27:43 +0100", "2026-12-11", []),  # 31 days
+        (None, None, []),  # no expiry
+    ],
+)
+def test_token_expiry(expiry, github, gitlab, listed, capsys):
+    fake, sent = expiry
+    headers = {"github-authentication-token-expiration": github} if github else {}
+    fake.routes[f"{GH}/rate_limit"] = Reply({"resources": {}}, headers)
+    fake.routes[TOKEN_SELF] = {"name": "alerts", "scopes": ["read_api"], "expires_at": gitlab}
+    assert ny.run() == []
+    if not listed:
+        assert sent == []
+        return
+    title, body = sent[0]
+    assert title == "Renovate: 2 item(s) need you, 2 new"
+    assert body == (
+        "GitHub access token\n"
+        "- GITHUB_TOKEN expires 2026-11-24\n"
+        "  expires in 14 days (new)\n"
+        "  https://github.com/settings/tokens\n"
+        "\n"
+        "GitLab access token\n"
+        "- GITLAB_TOKEN (alerts) expires 2026-12-10\n"
+        "  expires in 30 days (new)\n"
+        "  https://gitlab.example/-/user_settings/personal_access_tokens"
+    )
+    assert "gh-token" not in capsys.readouterr().out
+
+
+def test_token_expiry_days_is_configurable(expiry, monkeypatch):
+    fake, sent = expiry
+    only(monkeypatch, "GitLab")
+    monkeypatch.setattr(ny, "TOKEN_EXPIRY_DAYS", 60)
+    fake.routes[TOKEN_SELF] = {"name": "alerts", "scopes": ["api"], "expires_at": "2027-01-01"}
+    ny.run()
+    assert json.load(open(ny.STATE))["sent"] == [
+        "https://gitlab.example/-/user_settings/personal_access_tokens GITLAB_TOKEN expires within 60 days"
+    ]
+
+
+def test_token_expiry_skips_a_token_gitlab_cannot_describe(expiry, monkeypatch, capsys):
+    fake, sent = expiry
+    only(monkeypatch, "GitLab")
+    fake.routes[TOKEN_SELF] = 401
+    assert ny.run() == []
+    assert "GITLAB_TOKEN expiry skipped" in capsys.readouterr().out
+
+
+REPO_SEARCH = f"{GH}/search/repositories?q=user%3Aowner%20archived%3Afalse&per_page=100&page=1"
+
+
+def test_disabled_workflows(forges, monkeypatch):
+    fake, sent = forges
+    only(monkeypatch, "GitHub")
+    monkeypatch.setattr(ny, "DISABLED_WORKFLOWS", True)
+    route_github(fake, [], dashboards=[])
+    fake.routes[REPO_SEARCH] = {"total_count": 2, "items": [{"full_name": "owner/app"}, {"full_name": "owner/site"}]}
+    fake.routes[f"{GH}/repos/owner/app/actions/workflows?per_page=100"] = {
+        "total_count": 2,
+        "workflows": [
+            {"name": "CI", "state": "active", "html_url": "https://github.com/owner/app/actions/workflows/ci.yml"},
+            {
+                "name": "Nightly",
+                "state": "disabled_inactivity",
+                "html_url": "https://github.com/owner/app/actions/workflows/nightly.yml",
+            },
+            {
+                "name": "Old",
+                "state": "disabled_manually",
+                "html_url": "https://github.com/owner/app/actions/workflows/old.yml",
+            },
+        ],
+    }
+    fake.routes[f"{GH}/repos/owner/site/actions/workflows?per_page=100"] = {"total_count": 0, "workflows": []}
+    assert ny.run() == []
+    title, body = sent[0]
+    assert title == "Renovate: 1 item(s) need you, 1 new"
+    assert body == (
+        "GitHub owner/app\n"
+        "- Nightly\n"
+        "  disabled after 60 days without activity: no scheduled runs until enabled again (new)\n"
+        "  https://github.com/owner/app/actions/workflows/nightly.yml"
+    )
+
+
+RENOVATE_JSON = {
+    "extends": ["config:recommended"],
+    "packageRules": [
+        {"matchPackageNames": ["example/server"], "automerge": True},
+        {
+            "description": "example/server: held at 2.4.x until its clients support 2.5.",
+            "matchDepNames": ["registry.example/example/server"],
+            "allowedVersions": "/^2\\.4\\./",
+        },
+        {"description": ["Kept on", "the LTS line."], "matchPackageNames": "example/db", "allowedVersions": "<17"},
+        {"matchManagers": ["dockerfile"], "allowedVersions": "!/-rc/"},
+    ],
+}
+CONTENTS = f"{FJ}/repos/owner/infra/contents/renovate.json"
+HOLDS_BODY = """Forgejo owner/infra renovate.json
+- registry.example/example/server: allowedVersions /^2\\.4\\./
+  version hold: still needed?
+  example/server: held at 2.4.x until its clients support 2.5.
+  https://forgejo.example/owner/infra/src/branch/main/renovate.json
+- example/db: allowedVersions <17
+  version hold: still needed?
+  Kept on the LTS line.
+  https://forgejo.example/owner/infra/src/branch/main/renovate.json
+- packageRules[3]: allowedVersions !/-rc/
+  version hold: still needed?
+  https://forgejo.example/owner/infra/src/branch/main/renovate.json"""
+
+
+@pytest.fixture
+def holds(forges, monkeypatch):
+    fake, sent = forges
+    only(monkeypatch, "Forgejo")
+    monkeypatch.setattr(ny, "VERSION_HOLDS", True)
+    monkeypatch.setattr(ny, "HOLDS_REPO", "owner/infra")
+    route_forgejo(fake)
+    fake.routes[CONTENTS] = {
+        "content": base64.b64encode(json.dumps(RENOVATE_JSON).encode()).decode(),
+        "encoding": "base64",
+        "html_url": "https://forgejo.example/owner/infra/src/branch/main/renovate.json",
+    }
+    return forges
+
+
+def at(monkeypatch, day):
+    monkeypatch.setattr(ny, "NOW", dt.datetime.combine(day, dt.time(13), dt.UTC))
+
+
+def test_version_holds_every_fourth_monday(holds, monkeypatch):
+    fake, sent = holds
+    # The first run after they're switched on lists them, whatever the day.
+    assert ny.run() == []
+    assert sent == [("Renovate: 3 item(s) need you (version hold reminder)", HOLDS_BODY)]
+    assert json.load(open(ny.STATE))["sent"] == []  # never news on their own
+    monday = TUESDAY.date() + dt.timedelta(days=6)
+    for day in range(1, 28):  # the next days, and the next three Mondays: nothing
+        at(monkeypatch, TUESDAY.date() + dt.timedelta(days=day))
+        ny.run()
+    assert len(sent) == 1
+    at(monkeypatch, monday + dt.timedelta(days=21))  # 27 days since: not yet
+    ny.run()
+    assert len(sent) == 1
+    at(monkeypatch, monday + dt.timedelta(days=28))  # 34 days since
+    ny.run()
+    ny.run()  # a second run the same day doesn't repeat it
+    assert len(sent) == 2
+    assert sent[1][0] == "Renovate: 3 item(s) need you (version hold reminder)"
+    assert all(req.get_header("Authorization") == "token fj-token" for req, _ in fake.requests)
+
+
+def test_version_holds_join_a_message_only_when_due(holds, monkeypatch):
+    fake, sent = holds
+    ny.run()
+    route_forgejo(fake, [forgejo_pr(2, labels=("manual-review",))])
+    ny.run()  # a new PR the next run: the holds aren't due, so not listed
+    assert sent[1][0] == "Renovate: 1 PR(s) need you, 1 new"
+    assert "allowedVersions" not in sent[1][1]
+    # Four weeks on, Monday: the reminder lists both.
+    at(monkeypatch, TUESDAY.date() + dt.timedelta(days=34))
+    ny.run()
+    title, body = sent[2]
+    assert title == "Renovate: 4 item(s) need you (Monday reminder)"
+    assert body.startswith(
+        HOLDS_BODY + "\n\nForgejo owner/site\n- chore(deps): update traefik 2\n  manual review, open 36 days\n"
+    )
+
+
+def test_version_holds_undelivered_are_retried(holds, monkeypatch):
+    fake, sent = holds
+    ny.run()
+    monday = TUESDAY.date() + dt.timedelta(days=34)
+    at(monkeypatch, monday)
+    monkeypatch.setattr(ny, "notify", lambda *a: False)
+    assert ny.run() == ["Apprise did not accept the needs-you message; it is retried next run."]
+    assert json.load(open(ny.STATE))["holds_last_sent"] == TUESDAY.date().isoformat()
+    # The next run, a Tuesday, sends them.
+    at(monkeypatch, monday + dt.timedelta(days=1))
+    monkeypatch.setattr(ny, "notify", lambda url, title, body, type_: sent.append((title, body)) or True)
+    ny.run()
+    assert sent[1][0] == "Renovate: 3 item(s) need you (version hold reminder)"
+    at(monkeypatch, monday + dt.timedelta(days=2))
+    ny.run()
+    assert len(sent) == 2
+
+
+def test_version_holds_none_sends_nothing(holds):
+    fake, sent = holds
+    config = {"packageRules": [{"matchPackageNames": ["x"], "automerge": True}]}
+    fake.routes[CONTENTS]["content"] = base64.b64encode(json.dumps(config).encode()).decode()
+    assert ny.run() == []
+    assert sent == []
+
+
+@pytest.mark.parametrize(
+    ("forge", "url", "header"),
+    [
+        ("github", f"{GH}/repos/owner/infra/contents/renovate.json", "Bearer gh-token"),
+        ("gitlab", f"{GL}/projects/owner%2Finfra/repository/files/renovate.json?ref=HEAD", "Bearer gl-token"),
+    ],
+)
+def test_version_holds_on_other_forges(holds, monkeypatch, forge, url, header):
+    fake, sent = holds
+    monkeypatch.setattr(ny, "HOLDS_FORGE", forge)
+    monkeypatch.setattr(ny, f"{forge.upper()}_TOKEN", header.split()[1])
+    if forge == "github":
+        route_github(fake, [], dashboards=[])
+    else:
+        route_gitlab(fake)
+    content = base64.b64encode(json.dumps(RENOVATE_JSON).encode()).decode()
+    fake.routes[url] = {"content": content, "html_url": "https://github.com/owner/infra/blob/main/renovate.json"}
+    ny.run()
+    assert sent[0][1].startswith(f"{ny.FORGE_NAMES[forge]} owner/infra renovate.json\n- registry.example")
+    assert next(req for req, _ in fake.requests if req.full_url == url).get_header("Authorization") == header
+
+
+def test_version_holds_unreadable_keep_the_last_read(holds, monkeypatch):
+    fake, sent = holds
+    ny.run()
+    fake.routes[CONTENTS] = Responses(404)
+    at(monkeypatch, TUESDAY.date() + dt.timedelta(days=34))
+    failures = ny.run()
+    assert failures == ["Version holds could not be read (HTTP Error 404: error); its holds are as of the last check."]
+    assert sent[1][0] == "Renovate: 3 item(s) need you (version hold reminder)"
+
+
+@pytest.mark.parametrize(
+    ("switch", "unset", "message"),
+    [
+        ("GITLAB_USAGE", ["GITLAB_TOKEN"], "GITLAB_USAGE needs GITLAB_TOKEN"),
+        ("TOKEN_EXPIRY", ["GITHUB_TOKEN", "GITLAB_TOKEN"], "TOKEN_EXPIRY needs GITHUB_TOKEN or GITLAB_TOKEN"),
+        ("DISABLED_WORKFLOWS", ["GITHUB_TOKEN"], "DISABLED_WORKFLOWS needs GITHUB_TOKEN"),
+        ("VERSION_HOLDS", [], "VERSION_HOLDS needs HOLDS_REPO and FORGEJO_TOKEN"),
+    ],
+)
+def test_checks_missing_what_they_need_exit(forges, monkeypatch, switch, unset, message):
+    monkeypatch.setattr(ny, switch, True)
+    for var in unset:
+        monkeypatch.setattr(ny, var, "")
+    with pytest.raises(SystemExit, match=message):
+        ny.run()
+
+
+def test_holds_forge_must_be_known(forges, monkeypatch):
+    monkeypatch.setattr(ny, "VERSION_HOLDS", True)
+    monkeypatch.setattr(ny, "HOLDS_FORGE", "bitbucket")
+    with pytest.raises(SystemExit, match="HOLDS_FORGE is github, gitlab or forgejo"):
+        ny.run()
+
+
+@pytest.mark.parametrize(("value", "on"), [(None, False), ("off", False), ("on", True), ("ON", True)])
+def test_switch(monkeypatch, value, on):
+    if value is None:
+        monkeypatch.delenv("SOME_CHECK", raising=False)
+    else:
+        monkeypatch.setenv("SOME_CHECK", value)
+    assert ny.switch("SOME_CHECK") is on
+
+
+def test_switch_rejects_other_values(monkeypatch):
+    monkeypatch.setenv("SOME_CHECK", "yes")
+    with pytest.raises(SystemExit, match="SOME_CHECK is on or off"):
+        ny.switch("SOME_CHECK")
