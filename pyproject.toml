@@ -42,3 +42,7 @@ addopts = "-v --strict-markers"
 
 [tool.coverage.run]
 source = ["renovate_alert"]
+
+[tool.coverage.report]
+# The current total, rounded down: CI fails when coverage drops below it.
+fail_under = 97

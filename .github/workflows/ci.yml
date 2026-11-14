@@ -48,4 +48,6 @@ jobs:
       # auto-release runs inside docker-ci: Monday's schedule releases with
       # this strategy, a push to main only a CVE fix.
       release_strategy: conventional
+      # Offline start check: the app imports (APPRISE_URL is read at import).
+      smoke_cmd: "APPRISE_URL= python -c 'import renovate_alert'"
     secrets: inherit
