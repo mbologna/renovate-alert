@@ -59,7 +59,10 @@ so the failure is visible.
 A second, optional check (`NEEDS_YOU`, below) lists the Renovate PRs that
 need a person, on GitHub, GitLab and Forgejo: the ones held for manual review,
 and the ones whose CI failed. On GitHub it also lists the repositories the
-Renovate app has stopped visiting.
+Renovate app has stopped visiting. Four more checks can add to that list, each
+switched on by itself: GitLab CI minutes and storage near the quota, tokens
+about to expire, GitHub workflows disabled for inactivity, and a monthly list
+of version holds in a Renovate config (see [Upkeep checks](#upkeep-checks)).
 
 ## Configuration
 
@@ -201,7 +204,70 @@ Tokens, all read-only:
   with the `repo` scope for private ones. The search returns the private
   repositories the token can read.
 - **GitLab:** a personal, group or project access token with `read_api`.
+  `GITLAB_USAGE` also needs the token's user to own the namespace.
 - **Forgejo:** a token with `read:repository` and `read:issue`.
+
+### Upkeep checks
+
+Four more checks add entries to the same message, under the same rules: an
+entry is sent when it first appears or gains a new reason, and again in the
+Monday reminder while it lasts. A number that merely changes (more minutes
+used, a token a day closer to expiry) is no news. Each is off unless switched
+on, and each reads with the forge tokens above. A check that can't be read
+keeps its entries from the last good read and fails the run, as a forge does.
+
+- **GitLab usage** (`GITLAB_USAGE=on`): the CI minutes `GITLAB_NAMESPACE` has
+  used this month, against `GITLAB_MINUTES_QUOTA`, and the same projected
+  linearly to the end of the month. It is listed once the minutes used reach
+  `GITLAB_MINUTES_WARN` percent of the quota, or the projection reaches
+  `GITLAB_MINUTES_PROJECTED_WARN` percent. No projection is made in the first
+  `GITLAB_MINUTES_PROJECT_AFTER_DAYS` days of a month, when one build would
+  project to thirty. The namespace's storage, with its container registry
+  share, is listed above `GITLAB_STORAGE_WARN` percent of
+  `GITLAB_STORAGE_LIMIT_GIB`. Both come from GitLab's GraphQL API
+  (`ciMinutesUsage`, `namespace.rootStorageStatistics`), which works for a
+  user namespace and a group alike. They need the `read_api` scope (or `api`)
+  and the namespace's owner; without the scope the check says so in the log
+  and skips, sending nothing.
+- **Token expiry** (`TOKEN_EXPIRY=on`): `GITHUB_TOKEN` and `GITLAB_TOKEN` are
+  listed within `TOKEN_EXPIRY_DAYS` of their expiry. GitHub's comes from the
+  `github-authentication-token-expiration` header of an authenticated call
+  (`/rate_limit`), GitLab's from `GET /personal_access_tokens/self`. A token
+  with no expiry date is not listed; nor is a Forgejo token, as Forgejo
+  tokens don't expire. The log gives each date; token values are never
+  printed.
+- **Disabled workflows** (`DISABLED_WORKFLOWS=on`): GitHub workflows in
+  `GITHUB_OWNER`'s non-archived repositories whose state is
+  `disabled_inactivity`. GitHub stops scheduled workflows in a public
+  repository after 60 days without activity, without telling anyone. The
+  repositories come from a search (`user:<owner> archived:false`), the
+  workflows from `GET /repos/{owner}/{repo}/actions/workflows`, which the
+  fine-grained token's Actions permission covers.
+- **Version holds** (`VERSION_HOLDS=on`): every `packageRules` entry with
+  `allowedVersions` in `HOLDS_FILE` (JSON, not JSON5) of `HOLDS_REPO`, read
+  through `HOLDS_FORGE`'s API from the default branch. Each is listed with
+  what it matches and its `description`, so a hold put in place until
+  something upstream changes isn't forgotten. The holds are no news by
+  themselves: they go out every fourth Monday (28 days apart), in that day's
+  message, and on the first run after the check is switched on. A delivery
+  that fails is retried on the next run.
+
+| Variable | Default | |
+|---|---|---|
+| `GITLAB_USAGE` | `off` | `on`: list GitLab CI minutes and storage near the quota; needs `GITLAB_TOKEN` and `GITLAB_NAMESPACE` |
+| `GITLAB_MINUTES_QUOTA` | `400` | Monthly CI minutes (the Free tier's) |
+| `GITLAB_MINUTES_WARN` | `75` | Percent of the quota used that lists it |
+| `GITLAB_MINUTES_PROJECTED_WARN` | `100` | Percent of the quota projected by the end of the month that lists it |
+| `GITLAB_MINUTES_PROJECT_AFTER_DAYS` | `7` | Days into the month before minutes are projected |
+| `GITLAB_STORAGE_LIMIT_GIB` | `5` | Namespace storage limit in GiB |
+| `GITLAB_STORAGE_WARN` | `80` | Percent of the storage limit that lists it |
+| `TOKEN_EXPIRY` | `off` | `on`: list the GitHub and GitLab tokens close to expiry |
+| `TOKEN_EXPIRY_DAYS` | `30` | Days before expiry that list a token |
+| `DISABLED_WORKFLOWS` | `off` | `on`: list GitHub workflows disabled for inactivity; needs `GITHUB_TOKEN` and `GITHUB_OWNER` |
+| `VERSION_HOLDS` | `off` | `on`: list the version holds every fourth Monday; needs `HOLDS_REPO` and the token of `HOLDS_FORGE` |
+| `HOLDS_FORGE` | `forgejo` | `forgejo` (`FORGEJO_URL`), `github` or `gitlab` (`GITLAB_URL`) |
+| `HOLDS_REPO` | | `owner/repo` holding the Renovate config |
+| `HOLDS_FILE` | `renovate.json` | Path of the config in `HOLDS_REPO` |
 
 For example, in a Kubernetes CronJob alongside the run log checks:
 
@@ -218,6 +284,16 @@ env:
   - name: FORGEJO_URL
     value: https://codeberg.org
   - name: FORGEJO_REPOS
+    value: owner/infra
+  - name: GITLAB_USAGE
+    value: "on"
+  - name: TOKEN_EXPIRY
+    value: "on"
+  - name: DISABLED_WORKFLOWS
+    value: "on"
+  - name: VERSION_HOLDS
+    value: "on"
+  - name: HOLDS_REPO
     value: owner/infra
   - name: GITHUB_TOKEN
     valueFrom:

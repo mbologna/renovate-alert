@@ -18,7 +18,8 @@ undelivered digest does exit non-zero, so a failed Job shows it.
 
 NEEDS_YOU=on adds the Renovate PRs that need a person, on GitHub, GitLab and
 Forgejo, as a message of their own (needs_you.py); NEEDS_YOU=only runs that
-check alone.
+check alone. Optional checks add GitLab CI minutes and storage, token expiry,
+disabled GitHub workflows and a Renovate config's version holds to it.
 """
 
 import datetime as dt
