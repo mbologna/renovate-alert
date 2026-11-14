@@ -52,7 +52,7 @@ failing is reported by the first check after its failures start.
 Each problem is reported once, and again only if it goes away and comes back:
 a run failure counts as gone once a check reads none worth a report. The first time
 each update was seen, how far the logs have been read, and what has been
-reported, are kept in `LOG_DIR/alert-state.json`. A digest that Apprise doesn't
+reported, are kept in `STATE_DIR/alert-state.json`. A digest that Apprise doesn't
 accept is retried on the next run, logs included, and that run exits non-zero
 so the failure is visible.
 
@@ -71,9 +71,11 @@ Renovate app has stopped visiting.
 | `RENOVATE_TOKEN` | with `FORGE_API` | | Token that can read the repo's issues and PRs |
 | `APPRISE_URL` | yes | | Apprise notify URL, e.g. `http://apprise:8000/notify/alerts` |
 | `LOG_DIR` | no | `/logs` | Directory holding Renovate's run logs and the state file |
+| `LOG_SOURCE` | no | | `gs://bucket[/prefix]`: read the run logs from Google Cloud Storage instead of `LOG_DIR` (see below) |
+| `STATE_DIR` | no | `LOG_DIR` | Directory for the state files |
 | `WEB_URL` | no | `FORGE_API` without `/api/v1` | Base URL for the dashboard link |
 | `LOG_PREFIX` | no | `renovate-` | Run logs are `LOG_PREFIX*.log[.gz]` |
-| `STATE_FILE` | no | `alert-state.json` | State file name in `LOG_DIR`; give each check its own |
+| `STATE_FILE` | no | `alert-state.json` | State file name in `STATE_DIR`; give each check its own |
 | `NAME` | no | `REPOSITORY` | Name in the digest title |
 | `AUTOMERGE_LABEL` | no | `renovate-automerge` | Label that marks automerge PRs |
 | `RUN_STALE_HOURS` | no | `26` | Hours without a run log before it reports one missing; also how far back the first check reads logs |
@@ -89,6 +91,32 @@ such as GitLab. Two Renovates can share `LOG_DIR` if their logs use different
 Renovate only writes run logs when it's told to. Set `LOG_FILE` to a
 per-run path on a volume this check can read, e.g.
 `/logs/renovate-$(date -u +%Y%m%d-%H%M%S).log`.
+
+### Logs in Google Cloud Storage
+
+When Renovate runs somewhere this check can't mount a volume from, such as a
+Cloud Run job writing `LOG_FILE` to a Cloud Storage volume mount, set
+`LOG_SOURCE=gs://bucket[/prefix]`. The check lists the objects named
+`<prefix>/LOG_PREFIX*.log` or `.log.gz` (one level, no subfolders) and reads
+each new one through the Cloud Storage JSON API, using an object's last update
+time as the log's modification time. The state files stay local, in
+`STATE_DIR`, so the check still needs a small writable volume.
+
+It authenticates with a service account key file named by
+`GOOGLE_APPLICATION_CREDENTIALS`, exchanged for a token with the read-only
+`devstorage.read_only` scope. Give the account `roles/storage.objectViewer` on
+that bucket and nothing else. No Google client library is needed: the token
+request is signed with the standard library.
+
+```yaml
+env:
+  - name: LOG_SOURCE
+    value: gs://renovate-logs
+  - name: STATE_DIR
+    value: /state
+  - name: GOOGLE_APPLICATION_CREDENTIALS
+    value: /var/run/secrets/gcs/key.json
+```
 
 ## PRs that need you
 
@@ -128,7 +156,7 @@ already listed (its CI going red, say). A PR that merely stays open is not
 repeated, nor is a dashboard that goes another day without a visit. One that
 goes away (merged, CI fixed, visited) sends nothing; if it comes back, it is
 new again. On Mondays the full list goes out as a reminder, if it
-isn't empty. What was last sent is kept in `LOG_DIR/needs-you-state.json`,
+isn't empty. What was last sent is kept in `STATE_DIR/needs-you-state.json`,
 keyed by PR URL and reason.
 
 A forge that can't be read (after one retry on a timeout or a 5xx) keeps the
@@ -153,7 +181,7 @@ Each forge is checked only if its token is set:
 | `MANUAL_REVIEW_LABEL` | no | `manual-review` | Label of a PR held for review |
 | `DASHBOARD_TITLE` | no | `🤖 Renovate Dependency Dashboard` | Exact title of the GitHub Dependency Dashboard issues |
 | `DASHBOARD_STALE_DAYS` | no | `8` | Days a GitHub dashboard with updates awaiting schedule may go unchanged; `0`: off |
-| `NEEDS_YOU_STATE_FILE` | no | `needs-you-state.json` | State file name in `LOG_DIR` |
+| `NEEDS_YOU_STATE_FILE` | no | `needs-you-state.json` | State file name in `STATE_DIR` |
 
 The GitHub search covers the PRs of the Mend Renovate app. The dashboards
 come from a second search, `is:issue is:open in:title "Renovate Dependency
@@ -214,7 +242,7 @@ docker run --rm \
 ```
 
 The image runs as uid 1000 and works with a read-only root filesystem. It
-only needs write access to `LOG_DIR`, for the state file.
+only needs write access to `STATE_DIR` (`LOG_DIR` unless set), for the state files.
 
 ## Development
 

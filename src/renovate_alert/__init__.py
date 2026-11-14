@@ -6,11 +6,12 @@ filled branchConcurrentLimit and new updates were skipped with a debug-level
 log line, and runs that never started left nothing to read.
 
 Reads the Dependency Dashboard and the open PRs through the Forgejo/Gitea API,
-and every Renovate run log in LOG_DIR (written with Renovate's LOG_FILE) since
-the last check; a failed run counts only if Renovate did not recover from it
+and every Renovate run log (written with Renovate's LOG_FILE) since the last
+check, from LOG_DIR or, with LOG_SOURCE=gs://bucket[/prefix], from a Google
+Cloud Storage bucket (gcs.py); a failed run counts only if Renovate did not recover from it
 (to_report). Without FORGE_API it checks the run logs only, for a Renovate
 on another platform (one instance per log prefix, with its own state file). Keeps first-seen dates, and how far the logs have been read, in
-LOG_DIR/alert-state.json and notifies once per problem, as a single Apprise
+STATE_DIR/alert-state.json and notifies once per problem, as a single Apprise
 digest. Never exits non-zero for a problem it
 reports; a crash here is a bug in this program, not in Renovate. An
 undelivered digest does exit non-zero, so a failed Job shows it.
@@ -23,6 +24,7 @@ check alone.
 import datetime as dt
 import glob
 import gzip
+import io
 import json
 import os
 import re
@@ -31,7 +33,7 @@ import urllib.request
 
 from apprise_notify import notify
 
-from renovate_alert import needs_you
+from renovate_alert import gcs, needs_you
 
 # FORGE_API is the Forgejo/Gitea API base, e.g. https://codeberg.org/api/v1
 # (CODEBERG_API, its first name, still works). Unset: run logs only, no
@@ -49,10 +51,21 @@ NAME = os.environ.get("NAME") or REPO or "Renovate"
 WEB_URL = os.environ.get("WEB_URL") or API.removesuffix("/").removesuffix("/api/v1")
 AUTOMERGE_LABEL = os.environ.get("AUTOMERGE_LABEL", "renovate-automerge")
 LOG_DIR = os.environ.get("LOG_DIR", "/logs")
+# gs://bucket[/prefix]: read the run logs from Google Cloud Storage instead of
+# LOG_DIR, with the service account key in GOOGLE_APPLICATION_CREDENTIALS.
+LOG_SOURCE = os.environ.get("LOG_SOURCE", "")
+try:
+    GCS_BUCKET, GCS_PREFIX = gcs.parse_url(LOG_SOURCE) if LOG_SOURCE else ("", "")
+except ValueError as e:
+    sys.exit(f"LOG_SOURCE: {e}")
+# The state files; LOG_DIR unless set (with LOG_SOURCE, LOG_DIR holds nothing else).
+STATE_DIR = os.environ.get("STATE_DIR") or LOG_DIR
 # Run logs are LOG_PREFIX*.log[.gz]. Two Renovates can share LOG_DIR with
 # different prefixes; each check then needs its own STATE_FILE.
 LOG_PREFIX = os.environ.get("LOG_PREFIX", "renovate-")
-STATE = os.path.join(LOG_DIR, os.environ.get("STATE_FILE", "alert-state.json"))
+STATE = os.path.join(STATE_DIR, os.environ.get("STATE_FILE", "alert-state.json"))
+# A run log in the bucket: plain or gzipped.
+LOG_NAME = re.compile(r"\.log(\.gz)?$")
 # off: the Renovate checks only; on: those and the PRs that need you; only: the PRs alone.
 NEEDS_YOU = os.environ.get("NEEDS_YOU", "off").lower()
 if NEEDS_YOU not in ("off", "on", "only"):
@@ -134,9 +147,29 @@ def items(lines):
     return found
 
 
+def log_source():
+    """Where the run logs are read from, for messages."""
+    return LOG_SOURCE or LOG_DIR
+
+
 def run_logs():
-    """Every run log, current (plain) and rotated (.gz), oldest first."""
-    return sorted(glob.glob(os.path.join(LOG_DIR, f"{glob.escape(LOG_PREFIX)}*.log*")), key=os.path.getmtime)
+    """Every run log, current (plain) and rotated (.gz), as (path or object name, mtime), oldest first."""
+    if GCS_BUCKET:
+        logs = [log for log in gcs.list_objects(GCS_BUCKET, GCS_PREFIX + LOG_PREFIX) if LOG_NAME.search(log[0])]
+    else:
+        logs = [
+            (path, os.path.getmtime(path))
+            for path in glob.glob(os.path.join(LOG_DIR, f"{glob.escape(LOG_PREFIX)}*.log*"))
+        ]
+    return sorted(logs, key=lambda log: log[1])
+
+
+def open_log(path):
+    """One run log as text, from LOG_DIR or the bucket, decompressing a .gz."""
+    raw = gcs.open_object(GCS_BUCKET, path) if GCS_BUCKET else open(path, "rb")
+    if path.endswith(".gz"):
+        return gzip.open(raw, "rt", encoding="utf-8", errors="replace")
+    return io.TextIOWrapper(raw, encoding="utf-8", errors="replace")
 
 
 def run_name(path):
@@ -153,8 +186,7 @@ def scan_log(path):
     aborted = exit_error = False
     skipped = {}
     limit = None
-    opener = gzip.open if path.endswith(".gz") else open
-    with opener(path, "rt", errors="replace") as f:
+    with open_log(path) as f:
         for n, line in enumerate(f):
             aborted = aborted or any(marker in line for marker in ABORTED)
             exit_error = exit_error or any(marker in line for marker in EXIT_ERROR)
@@ -215,12 +247,12 @@ def check_renovate():
     # 1. Did Renovate run, and did every run since the last check finish cleanly?
     logs = run_logs()
     if not logs:
-        problems["no-log"] = f"No Renovate run log in {LOG_DIR}."
+        problems["no-log"] = f"No Renovate run log in {log_source()}."
     else:
-        age_h = (NOW.timestamp() - os.path.getmtime(logs[-1])) / 3600
+        age_h = (NOW.timestamp() - logs[-1][1]) / 3600
         if age_h > RUN_STALE_HOURS:
             problems["stale"] = (
-                f"No Renovate run for {age_h:.0f}h (newest log {os.path.basename(logs[-1])}). "
+                f"No Renovate run for {age_h:.0f}h (newest log {os.path.basename(logs[-1][0])}). "
                 "Check whatever schedules Renovate (CronJob, timer) and its last run."
             )
 
@@ -229,10 +261,10 @@ def check_renovate():
     # mtime when the next run compresses a log, so a rotated log is not read
     # twice. With no record yet, look back RUN_STALE_HOURS.
     since = state.get("logs_read_until", NOW.timestamp() - RUN_STALE_HOURS * 3600)
-    new_logs = [path for path in logs if os.path.getmtime(path) > since]
+    new_logs = [(path, mtime) for path, mtime in logs if mtime > since]
     # A branch skipped again by each run is one problem, not one per run.
     aborted, exit_error, limited, skipped, runs = [], [], {}, {}, []
-    for path in new_logs:
+    for path, _ in new_logs:
         run_aborted, run_exit_error, run_skipped = scan_log(path)
         name = run_name(path)
         runs.append((name, run_aborted or run_exit_error))
@@ -280,7 +312,7 @@ def check_renovate():
     # Keys are stable while a problem lasts, so each alerts once; forgetting the
     # resolved ones means a recurrence alerts again. An undelivered digest also
     # keeps the logs unread, so the next run reports what was in them.
-    read_until = max((os.path.getmtime(path) for path in new_logs), default=since) if sent else since
+    read_until = max((mtime for _, mtime in new_logs), default=since) if sent else since
     last_failed = runs[-1][1] if runs and sent else failed_before
     with open(STATE + ".tmp", "w") as f:
         json.dump(
