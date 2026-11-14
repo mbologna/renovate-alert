@@ -12,7 +12,7 @@ has not visited it for a whole schedule window.
 
 The message goes out when something new appears, and again every Monday as a
 reminder while the list is not empty. What was last sent is kept in
-LOG_DIR/needs-you-state.json, keyed by PR URL and reason, so a PR that merely
+STATE_DIR (default LOG_DIR)/needs-you-state.json, keyed by PR URL and reason, so a PR that merely
 stays open is not repeated, and one that goes away and comes back is.
 """
 
@@ -42,7 +42,10 @@ AUTOMERGE_LABEL = os.environ.get("AUTOMERGE_LABEL", "renovate-automerge")
 MANUAL_REVIEW_LABEL = os.environ.get("MANUAL_REVIEW_LABEL", "manual-review")
 DASHBOARD_TITLE = os.environ.get("DASHBOARD_TITLE") or "🤖 Renovate Dependency Dashboard"
 DASHBOARD_STALE_DAYS = int(os.environ.get("DASHBOARD_STALE_DAYS") or 8)
-STATE = os.path.join(os.environ.get("LOG_DIR", "/logs"), os.environ.get("NEEDS_YOU_STATE_FILE", "needs-you-state.json"))
+STATE = os.path.join(
+    os.environ.get("STATE_DIR") or os.environ.get("LOG_DIR", "/logs"),
+    os.environ.get("NEEDS_YOU_STATE_FILE", "needs-you-state.json"),
+)
 
 # Codeberg's PR list takes up to 30 s and answers 504 at times: Forgejo calls
 # get a long timeout, and every call one retry after a timeout or a 5xx.
