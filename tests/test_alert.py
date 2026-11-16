@@ -377,3 +377,40 @@ def test_logs_only_mode_reports_a_missing_run(env, monkeypatch):
     write_log(log_dir, " INFO: done\n", age_hours=30, name="gitlab-renovate-20261021-053000.log")
     ra.main()
     assert "No Renovate run for 30h (newest log gitlab-renovate-20261021-053000.log)" in sent[0][1]
+
+
+def test_forge_read_retries_a_gateway_error_and_a_timeout(monkeypatch):
+    import io
+    import urllib.error
+
+    outcomes = [urllib.error.HTTPError("u", 504, "gw", {}, None), TimeoutError("read timed out"), b"[]"]
+    calls, sleeps = [], []
+
+    class Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def urlopen(req, timeout):
+        calls.append(req.full_url)
+        o = outcomes.pop(0)
+        if isinstance(o, Exception):
+            raise o
+        return Resp(o)
+
+    monkeypatch.setattr(ra.urllib.request, "urlopen", urlopen)
+    assert ra.get("pulls", sleep=sleeps.append) == []
+    assert len(calls) == 3 and sleeps == [10, 20]
+
+
+def test_forge_read_does_not_retry_a_client_error(monkeypatch):
+    import urllib.error
+
+    def urlopen(req, timeout):
+        raise urllib.error.HTTPError("u", 404, "nf", {}, None)
+
+    monkeypatch.setattr(ra.urllib.request, "urlopen", urlopen)
+    with pytest.raises(urllib.error.HTTPError):
+        ra.get("pulls", sleep=lambda s: pytest.fail("retried a 404"))

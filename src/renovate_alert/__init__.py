@@ -30,6 +30,8 @@ import json
 import os
 import re
 import sys
+import time
+import urllib.error
 import urllib.request
 
 from apprise_notify import notify
@@ -122,10 +124,26 @@ NOW = dt.datetime.now(dt.UTC)
 ITEM = re.compile(r"^ - \[ \] <!-- [\w-]+=(?P<branch>[^ ]+) -->\[?(?P<title>.*?)(\]\(pulls/\d+\))?$")
 
 
-def get(path):
+# Codeberg answered 504s and timed out reads on 2026-11-16; one timeout
+# crashed the daily run. A read retries a gateway error or a timeout twice.
+READ_ATTEMPTS = 3
+READ_RETRY_SECONDS = 10
+
+
+def get(path, sleep=time.sleep):
     req = urllib.request.Request(f"{API}/repos/{REPO}/{path}", headers={"Authorization": f"token {TOKEN}"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.load(r)
+    for attempt in range(1, READ_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code not in (502, 503, 504) or attempt == READ_ATTEMPTS:
+                raise
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == READ_ATTEMPTS:
+                raise
+        sleep(READ_RETRY_SECONDS * attempt)
+    raise AssertionError("unreachable")
 
 
 def sections(body):
