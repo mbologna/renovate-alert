@@ -125,7 +125,10 @@ ITEM = re.compile(r"^ - \[ \] <!-- [\w-]+=(?P<branch>[^ ]+) -->\[?(?P<title>.*?)
 
 
 # Codeberg answered 504s and timed out reads on 2026-11-16; one timeout
-# crashed the daily run. A read retries a gateway error or a timeout twice.
+# crashed the daily run. A read retries a gateway error or a timeout twice,
+# and waits up to 120 s: listing infra's 17 open pull requests took 42 s that
+# day (image-cve-alert waits as long for the same list).
+READ_TIMEOUT_SECONDS = 120
 READ_ATTEMPTS = 3
 READ_RETRY_SECONDS = 10
 
@@ -134,7 +137,7 @@ def get(path, sleep=time.sleep):
     req = urllib.request.Request(f"{API}/repos/{REPO}/{path}", headers={"Authorization": f"token {TOKEN}"})
     for attempt in range(1, READ_ATTEMPTS + 1):
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with urllib.request.urlopen(req, timeout=READ_TIMEOUT_SECONDS) as r:
                 return json.load(r)
         except urllib.error.HTTPError as e:
             if e.code not in (502, 503, 504) or attempt == READ_ATTEMPTS:
