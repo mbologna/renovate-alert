@@ -16,6 +16,14 @@ All of these happened without a single error anywhere:
   `"result": "external-host-error"`.
 - **A run failed:** the log says "Renovate is exiting with a non-zero code" or
   "... with an error-specific code".
+- **A repository's run failed:** its "Repository finished" record has a
+  result that is an error, such as `unknown-error`, `config-validation`,
+  `forbidden` or `not-found`, so Renovate updates nothing there. It is
+  reported with the repository's name and the first line of the cause, even
+  when Renovate exited 0, until a later run of that repository ends cleanly.
+  Results that mean "nothing to do" (`done`, `automerged`, disabled, fork,
+  archived, no config) and transient ones (`external-host-error`,
+  `rate-limit-exceeded`, `temporary-error`) are not.
 - **A limit kept new branches from being created:** Renovate logs the same
   debug-level skip line for every limit, so the line before it decides which
   one is reported (`branchConcurrentLimit`, `prHourlyLimit`,
@@ -32,6 +40,11 @@ All of these happened without a single error anywhere:
   is reported once while it stays held. This is the only sign of a dateless
   update grouped with dated ones: the dashboard's Pending Status Checks lists
   a branch only when every update in it is pending.
+- **An update is still pending long after its release:** the debug record
+  "packageFiles with updates" (logged by real and `--dry-run=lookup` runs
+  alike) marks it `pendingChecks` though its release is older than
+  `OVERDUE_DAYS`. The age gate should have let it through long ago, so
+  something else holds it.
 - **An update has been stuck too long:** in Rate-Limited (the merge queue isn't
   draining) or in Pending Status Checks (usually a release with no timestamp
   for `minimumReleaseAge`).
@@ -92,9 +105,11 @@ of version holds in a Renovate config (see [Upkeep checks](#upkeep-checks)).
 | `PENDING_DAYS` | no | `35` | Days in Pending Status Checks before an update counts as stuck |
 | `RATE_LIMITED_DAYS` | no | `10` | Days in Rate-Limited before an update counts as stuck |
 | `OPEN_AUTOMERGE_DAYS` | no | `8` | Days an automerge PR may stay open |
+| `OVERDUE_DAYS` | no | `95` | Days since its release after which a still-pending update is reported |
 
 Without `FORGE_API` the check reads the run logs only (missing runs, aborted or
-failed runs, the branch limit, releases with no date), for a Renovate on a
+failed runs, failed repositories, the branch limit, releases with no date,
+overdue updates), for a Renovate on a
 platform it can't query, such as GitLab. Two Renovates can share `LOG_DIR` if their logs use different
 `LOG_PREFIX`es; run one check per prefix, each with its own `STATE_FILE`.
 
