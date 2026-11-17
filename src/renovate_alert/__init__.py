@@ -119,6 +119,16 @@ LIMIT_HINT = {
     "prHourlyLimit": "An hourly cap parks updates even while the queue has room; Renovate's default is 2.",
 }
 BRANCH_ID = re.compile(r"\(repository=[^,)]+, branch=[^)]+\)")
+# Under minimumReleaseAgeBehaviour=timestamp-required (the default), a release
+# with no release date is pending for good, and Renovate says so only in this
+# debug line, followed by the updates it holds. The dashboard's Pending Status
+# Checks lists a branch only when every update in it is pending, so a grouped
+# update held this way shows nowhere else.
+DATELESS = "do not have a releaseTimestamp and we're running with minimumReleaseAgeBehaviour=timestamp-required"
+REPOSITORY = re.compile(r'\(repository=([^,)]+)|"repository":\s*"([^"]+)"')
+DEP_NAME = re.compile(r'"depName":\s*"([^"]+)"')
+# Pretty-format log lines carry a record's fields indented under its message.
+DETAIL = "       "
 
 NOW = dt.datetime.now(dt.UTC)
 ITEM = re.compile(r"^ - \[ \] <!-- [\w-]+=(?P<branch>[^ ]+) -->\[?(?P<title>.*?)(\]\(pulls/\d+\))?$")
@@ -199,17 +209,29 @@ def run_name(path):
 
 
 def scan_log(path):
-    """Return (aborted, exit_error, branch-limit skips) for one run log.
+    """Return (aborted, exit_error, branch-limit skips, dateless updates) for one run log.
 
     The skips map each limit option to the branches it kept from being
-    created, as "(repository=..., branch=...)" ids. Streamed line by line: a
+    created, as "(repository=..., branch=...)" ids; the dateless updates map
+    each repository to the dependencies held pending for want of a release
+    date. Reads LOG_FILE_FORMAT=pretty and JSON logs. Streamed line by line: a
     full debug log runs to tens of megabytes.
     """
     aborted = exit_error = False
-    skipped = {}
+    skipped, dateless = {}, {}
     limit = None
+    held = None  # the dateless set the pretty detail lines belong to
     with open_log(path) as f:
         for n, line in enumerate(f):
+            if held is not None and line.startswith(DETAIL):
+                held.update(DEP_NAME.findall(line))
+                continue
+            held = None
+            if DATELESS in line:
+                repo = REPOSITORY.search(line)
+                held = dateless.setdefault((repo[1] or repo[2]) if repo else NAME, set())
+                held.update(DEP_NAME.findall(line))
+                continue
             aborted = aborted or any(marker in line for marker in ABORTED)
             exit_error = exit_error or any(marker in line for marker in EXIT_ERROR)
             if m := LIMIT_REACHED.search(line):
@@ -218,7 +240,7 @@ def scan_log(path):
                 branch = BRANCH_ID.search(line)
                 skipped.setdefault(limit or "an unidentified limit", set()).add(branch[0] if branch else f"{path}:{n}")
                 limit = None
-    return aborted, exit_error, skipped
+    return aborted, exit_error, skipped, dateless
 
 
 def to_report(runs, failed_before=False):
@@ -285,9 +307,11 @@ def check_renovate():
     since = state.get("logs_read_until", NOW.timestamp() - RUN_STALE_HOURS * 3600)
     new_logs = [(path, mtime) for path, mtime in logs if mtime > since]
     # A branch skipped again by each run is one problem, not one per run.
-    aborted, exit_error, limited, skipped, runs = [], [], {}, {}, []
+    aborted, exit_error, limited, skipped, dateless, runs = [], [], {}, {}, {}, []
     for path, _ in new_logs:
-        run_aborted, run_exit_error, run_skipped = scan_log(path)
+        run_aborted, run_exit_error, run_skipped, run_dateless = scan_log(path)
+        for repo, deps in run_dateless.items():
+            dateless.setdefault(repo, set()).update(deps)
         name = run_name(path)
         runs.append((name, run_aborted or run_exit_error))
         if run_aborted:
@@ -316,6 +340,15 @@ def check_renovate():
             f"Run {', '.join(limited[option])} hit {option} and skipped {len(branches)} new branch(es). "
             + LIMIT_HINT.get(option, "")
         ).rstrip()
+
+    # One key per dependency: a new one alerts without repeating the others.
+    for repo, deps in sorted(dateless.items()):
+        for dep in sorted(deps) or ["an unnamed dependency"]:
+            problems[f"dateless:{repo}:{dep}"] = (
+                f"{dep} ({repo}): a release has no release date, so minimumReleaseAge holds it pending for good. "
+                "Look it up in a datasource that dates releases, or give it minimumReleaseAgeBehaviour "
+                "timestamp-optional."
+            )
 
     current = {}
     if API:

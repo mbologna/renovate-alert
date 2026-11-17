@@ -159,6 +159,40 @@ def test_branch_limit_skips_are_told_apart_and_deduplicated(env):
     assert {"branch-limit", "branch-limit:prHourlyLimit"} <= set(json.load(open(ra.STATE))["alerted"])
 
 
+# What Renovate writes with LOG_FILE_FORMAT=pretty when releases have no
+# release date: the updates it holds, wrapped onto indented detail lines.
+DATELESS_MESSAGE = (
+    "Marking 2 release(s) as pending, as they do not have a releaseTimestamp and "
+    "we're running with minimumReleaseAgeBehaviour=timestamp-required"
+)
+DATELESS_LOG = f"""DEBUG: {DATELESS_MESSAGE} (repository=owner/infra, branch=renovate/images)
+       "updates": [
+         {{"depName": "golang", "updateType": "patch"}},
+         {{"depName": "registry.k8s.io/pause", "updateType": "minor"}}
+       ]
+DEBUG: Branch renovate/images is pending (repository=owner/infra, branch=renovate/images)
+       "depName": "not-held"
+"""
+
+
+def test_dateless_updates_held_for_good_are_reported_per_dependency(env):
+    log_dir, sent, _ = env
+    write_log(log_dir, DATELESS_LOG, age_hours=2, name="renovate-20261116-013000.log")
+    json_line = {"msg": DATELESS_MESSAGE, "repository": "owner/dotfiles", "updates": [{"depName": "java-jdk"}]}
+    write_log(log_dir, json.dumps(json_line) + "\n", name="renovate-20261116-063000.log")
+    ra.main()
+    body = sent[0][1]
+    assert "golang (owner/infra): a release has no release date, so minimumReleaseAge holds it pending" in body
+    assert "registry.k8s.io/pause (owner/infra)" in body
+    assert "java-jdk (owner/dotfiles)" in body
+    assert "not-held" not in body  # another record's detail line
+
+    # A run that holds one more: only the new one is sent.
+    write_log(log_dir, DATELESS_LOG.replace('"golang"', '"node"'), age_hours=0.5, name="renovate-20261116-073000.log")
+    ra.main()
+    assert "node (owner/infra)" in sent[1][1] and "pause" not in sent[1][1]
+
+
 def test_branch_limit_without_a_limit_line(env):
     log_dir, sent, _ = env
     write_log(log_dir, "Reached branch limit - skipping branch creation\n" * 2)

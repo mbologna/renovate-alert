@@ -25,6 +25,13 @@ All of these happened without a single error anywhere:
   on its own. Two expected warnings are skipped: `timestamp-optional,
   proceeding` and `Could not determine resolved version after updating
   package file` (Terraform provider and lock file branches log it every run).
+- **A release has no release date:** under `minimumReleaseAge` with the
+  default `minimumReleaseAgeBehaviour=timestamp-required`, Renovate holds it
+  pending for good and says so in one debug line ("Marking N release(s) as
+  pending, as they do not have a releaseTimestamp"). Each dependency it names
+  is reported once while it stays held. This is the only sign of a dateless
+  update grouped with dated ones: the dashboard's Pending Status Checks lists
+  a branch only when every update in it is pending.
 - **An update has been stuck too long:** in Rate-Limited (the merge queue isn't
   draining) or in Pending Status Checks (usually a release with no timestamp
   for `minimumReleaseAge`).
@@ -87,13 +94,15 @@ of version holds in a Renovate config (see [Upkeep checks](#upkeep-checks)).
 | `OPEN_AUTOMERGE_DAYS` | no | `8` | Days an automerge PR may stay open |
 
 Without `FORGE_API` the check reads the run logs only (missing runs, aborted or
-failed runs, the branch limit), for a Renovate on a platform it can't query,
-such as GitLab. Two Renovates can share `LOG_DIR` if their logs use different
+failed runs, the branch limit, releases with no date), for a Renovate on a
+platform it can't query, such as GitLab. Two Renovates can share `LOG_DIR` if their logs use different
 `LOG_PREFIX`es; run one check per prefix, each with its own `STATE_FILE`.
 
 Renovate only writes run logs when it's told to. Set `LOG_FILE` to a
 per-run path on a volume this check can read, e.g.
-`/logs/renovate-$(date -u +%Y%m%d-%H%M%S).log`.
+`/logs/renovate-$(date -u +%Y%m%d-%H%M%S).log`. Keep `LOG_FILE_LEVEL` at its
+default, `debug`: the branch limits and dateless releases are logged only at
+that level.
 
 ### Logs in Google Cloud Storage
 
