@@ -448,3 +448,122 @@ def test_forge_read_does_not_retry_a_client_error(monkeypatch):
     monkeypatch.setattr(ra.urllib.request, "urlopen", urlopen)
     with pytest.raises(urllib.error.HTTPError):
         ra.get("pulls", sleep=lambda s: pytest.fail("retried a 404"))
+
+
+def finished(repo, result):
+    return f""" INFO: Repository finished (repository={repo})
+       "cloned": true,
+       "durationMs": 1234,
+       "result": "{result}",
+       "status": "unknown",
+       "enabled": true,
+       "onboarded": true
+"""
+
+
+# What Renovate writes with LOG_FILE_FORMAT=pretty when a repository fails:
+# the err without its stack as a field, then the stack, then the result.
+FAILED_LOG = (
+    """ INFO: Repository started (repository=owner/private)
+ERROR: Repository has unknown error (repository=owner/private)
+       "err": {
+         "message": "Resource not accessible by personal access token\\nsecond line",
+         "name": "Error"
+       }
+       Error: Resource not accessible by personal access token
+           at GithubGraphqlDatasource.query (/usr/src/app/lib/github.js:1:1)
+"""
+    + finished("owner/private", "unknown-error")
+    + finished("owner/fine", "done")
+    + finished("owner/fork", "fork")
+    + finished("owner/gone", "not-found")
+    + finished("owner/flaky", "forbidden")
+    # Renovate prints an unset field as a bare undefined.
+    + """ INFO: Repository finished (repository=owner/unset)
+       "durationMs": 596,
+       "result": undefined,
+       "exitCode": undefined
+"""
+)
+
+
+def test_failed_repositories_are_reported_with_their_cause(env):
+    log_dir, sent, _ = env
+    write_log(log_dir, FAILED_LOG, age_hours=2, name="renovate-20261116-013000.log")
+    # JSON format; flaky recovers in this later run.
+    lines = [
+        {"msg": "Repository has unknown error", "repository": "owner/json", "err": {"message": "boom"}},
+        {"msg": "Repository finished", "repository": "owner/json", "result": "config-validation"},
+        {"msg": "Repository finished", "repository": "owner/flaky", "result": "done"},
+    ]
+    write_log(log_dir, "".join(json.dumps(line) + "\n" for line in lines), name="renovate-20261116-063000.log")
+    ra.main()
+    body = sent[0][1]
+    assert (
+        "owner/private: Renovate's run ended in unknown-error (Resource not accessible by personal access token), "
+        "so it updates nothing there until the cause is fixed." in body
+    )
+    assert "owner/gone: Renovate's run ended in not-found, so" in body
+    assert "owner/json: Renovate's run ended in config-validation (boom)" in body
+    for repo in ("owner/fine", "owner/fork", "owner/flaky", "owner/unset"):
+        assert repo not in body
+    assert "second line" not in body
+
+
+def test_error_message_without_one():
+    assert ra.error_message(" WARN: Git error - aborting (repository=r)\n", ['       "x": 1\n']) == ""
+    assert ra.error_message('{"msg": "Git error - aborting", "err": "text"}\n', []) == ""
+    assert ra.record_data("{not json\n", []) == {}
+    assert ra.record_data("[1]\n", []) == {}
+
+
+def package_files(repo, updates):
+    config = {
+        "regex": [{"packageFile": "vars.tf", "deps": [{"depName": "k3s", "currentValue": "v1.0", "updates": updates}]}]
+    }
+    detail = json.dumps({"config": config}, indent=2)[1:-1].strip("\n")
+    return f"DEBUG: packageFiles with updates (repository={repo}, baseBranch=main)\n" + "".join(
+        f"       {line}\n" for line in detail.splitlines()
+    )
+
+
+def stamp(days_ago):
+    return (ra.NOW - dt.timedelta(days=days_ago)).isoformat().replace("+00:00", "Z")
+
+
+def test_updates_pending_too_long_are_reported(env):
+    log_dir, sent, _ = env
+    pretty = package_files(
+        "owner/infra",
+        [
+            {"newVersion": "v2.0", "pendingChecks": True, "releaseTimestamp": stamp(120)},
+            {"newVersion": "v1.5", "pendingChecks": True, "releaseTimestamp": stamp(10)},
+            {"newVersion": "v1.1", "releaseTimestamp": stamp(200)},
+            {"newVersion": "v1.2", "pendingChecks": True, "releaseTimestamp": "not a date"},
+        ],
+    )
+    write_log(log_dir, pretty + finished("owner/infra", "done"), age_hours=2, name="renovate-20261116-013000.log")
+    record = {
+        "msg": "packageFiles with updates",
+        "repository": "owner/dotfiles",
+        "config": {
+            "custom.regex": [
+                {
+                    "deps": [
+                        {
+                            "depName": "java",
+                            "currentValue": "21",
+                            "updates": [{"newValue": "25", "pendingChecks": True, "releaseTimestamp": stamp(100)}],
+                        }
+                    ]
+                }
+            ]
+        },
+    }
+    write_log(log_dir, json.dumps(record) + "\n", name="renovate-20261116-063000.log")
+    ra.main()
+    body = sent[0][1]
+    assert "k3s v1.0 -> v2.0 (owner/infra): released 120 days ago and still pending." in body
+    assert "java 21 -> 25 (owner/dotfiles): released 100 days ago" in body
+    for version in ("v1.5", "v1.1", "v1.2"):
+        assert version not in body

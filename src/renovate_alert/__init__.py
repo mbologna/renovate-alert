@@ -9,7 +9,9 @@ Reads the Dependency Dashboard and the open PRs through the Forgejo/Gitea API,
 and every Renovate run log (written with Renovate's LOG_FILE) since the last
 check, from LOG_DIR or, with LOG_SOURCE=gs://bucket[/prefix], from a Google
 Cloud Storage bucket (gcs.py); a failed run counts only if Renovate did not recover from it
-(to_report). Without FORGE_API it checks the run logs only, for a Renovate
+(to_report). The logs also name each repository whose run ended in an
+error, and the updates still pending OVERDUE_DAYS after their release.
+Without FORGE_API it checks the run logs only, for a Renovate
 on another platform (one instance per log prefix, with its own state file). Keeps first-seen dates, and how far the logs have been read, in
 STATE_DIR/alert-state.json and notifies once per problem, as a single Apprise
 digest. Never exits non-zero for a problem it
@@ -82,6 +84,9 @@ RATE_LIMITED_DAYS = int(os.environ.get("RATE_LIMITED_DAYS", "10"))
 OPEN_AUTOMERGE_DAYS = int(os.environ.get("OPEN_AUTOMERGE_DAYS", "8"))
 # Runs every day, the longest gap between scheduled runs is 11h45m.
 RUN_STALE_HOURS = int(os.environ.get("RUN_STALE_HOURS", "26"))
+# Days since its release before a pending update counts as overdue: no age
+# gate (minimumReleaseAge) lasts this long, so something else holds it.
+OVERDUE_DAYS = int(os.environ.get("OVERDUE_DAYS", "95"))
 
 # Dashboard Repository Problems that are expected, so never reported.
 HARMLESS_PROBLEMS = (
@@ -127,8 +132,54 @@ BRANCH_ID = re.compile(r"\(repository=[^,)]+, branch=[^)]+\)")
 DATELESS = "do not have a releaseTimestamp and we're running with minimumReleaseAgeBehaviour=timestamp-required"
 REPOSITORY = re.compile(r'\(repository=([^,)]+)|"repository":\s*"([^"]+)"')
 DEP_NAME = re.compile(r'"depName":\s*"([^"]+)"')
-# Pretty-format log lines carry a record's fields indented under its message.
+# Pretty-format log lines carry a record's fields indented under its message,
+# as "key": value lines joined by commas, so braces around them make JSON.
 DETAIL = "       "
+# Each repository's run ends with this record; its result says how. Each of
+# its fields is printed on its own and can be a bare undefined, which isn't
+# JSON, so the result is matched instead of parsed.
+FINISHED = "Repository finished"
+RESULT = re.compile(r'"result":\s*"([^"]+)"')
+# Results that are no failure: success, a repository Renovate skips by design
+# (archived, no config, a fork...), an external host error (ABORTED has a check
+# of its own) and the temporary errors the next run clears. Anything else,
+# such as unknown-error, forbidden or a config error, means Renovate skipped the
+# repository: nothing in it is updated until someone fixes the cause.
+REPOSITORY_OK = frozenset(
+    {
+        "done",
+        "automerged",
+        "onboarding",
+        "archived",
+        "blocked",
+        "cannot-fork",
+        "disabled",
+        "disabled-by-config",
+        "disabled-closed-onboarding",
+        "disabled-no-config",
+        "empty",
+        "fork",
+        "fork-missing",
+        "fork-mode-forked",
+        "mirror",
+        "no-package-files",
+        "pending-deletion",
+        "renamed",
+        "uninitiated",
+        "external-host-error",
+        "no-vulnerability-alerts",
+        "rate-limit-exceeded",
+        "repository-changed",
+        "temporary-error",
+    }
+)
+# The records whose err names why a repository failed (workers/repository/error.ts).
+CAUSES = ("Repository has unknown error", "Repository has invalid config", "Git error - aborting")
+ERR_MESSAGE = re.compile(r'"message":\s*("(?:[^"\\]|\\.)*")')
+# The dependencies of each package file, with the updates found for them.
+PACKAGE_FILES = "packageFiles with updates"
+# The records read_record reads.
+RECORDS = (DATELESS, FINISHED, PACKAGE_FILES, *CAUSES)
 
 NOW = dt.datetime.now(dt.UTC)
 ITEM = re.compile(r"^ - \[ \] <!-- [\w-]+=(?P<branch>[^ ]+) -->\[?(?P<title>.*?)(\]\(pulls/\d+\))?$")
@@ -208,39 +259,113 @@ def run_name(path):
     return os.path.basename(path).split(".")[0]
 
 
-def scan_log(path):
-    """Return (aborted, exit_error, branch-limit skips, dateless updates) for one run log.
+class Scan:
+    """What one run log says: see scan_log."""
 
-    The skips map each limit option to the branches it kept from being
-    created, as "(repository=..., branch=...)" ids; the dateless updates map
-    each repository to the dependencies held pending for want of a release
-    date. Reads LOG_FILE_FORMAT=pretty and JSON logs. Streamed line by line: a
-    full debug log runs to tens of megabytes.
+    def __init__(self):
+        self.aborted = self.exit_error = False
+        self.skipped, self.dateless, self.results, self.overdue = {}, {}, {}, {}
+
+
+def scan_log(path):
+    """Read one run log into a Scan.
+
+    aborted and exit_error say whether the run failed. skipped maps each limit
+    option to the branches it kept from being created, as "(repository=...,
+    branch=...)" ids. Per repository: dateless holds the dependencies held
+    pending for want of a release date, results how its run ended, as
+    (result, cause), and overdue the updates pending for longer than
+    OVERDUE_DAYS, as (depName, current, new, days). Reads LOG_FILE_FORMAT=pretty
+    and JSON logs. Streamed: a full debug log runs to tens of megabytes, so
+    only the record being read is held.
     """
-    aborted = exit_error = False
-    skipped, dateless = {}, {}
+    scan = Scan()
     limit = None
-    held = None  # the dateless set the pretty detail lines belong to
+    # The record being read: its first line, and its detail lines if it is one
+    # read_record reads (others can run to megabytes).
+    record = None
+    causes = {}  # repository -> why its run failed, until it finishes
     with open_log(path) as f:
         for n, line in enumerate(f):
-            if held is not None and line.startswith(DETAIL):
-                held.update(DEP_NAME.findall(line))
-                continue
-            held = None
-            if DATELESS in line:
-                repo = REPOSITORY.search(line)
-                held = dateless.setdefault((repo[1] or repo[2]) if repo else NAME, set())
-                held.update(DEP_NAME.findall(line))
-                continue
-            aborted = aborted or any(marker in line for marker in ABORTED)
-            exit_error = exit_error or any(marker in line for marker in EXIT_ERROR)
+            if record is not None and line.startswith(DETAIL):
+                if record[1] is not None:
+                    record[1].append(line)
+            else:
+                if record is not None and record[1] is not None:
+                    read_record(scan, causes, *record)
+                record = (line, [] if any(marker in line for marker in RECORDS) else None)
+            scan.aborted = scan.aborted or any(marker in line for marker in ABORTED)
+            scan.exit_error = scan.exit_error or any(marker in line for marker in EXIT_ERROR)
             if m := LIMIT_REACHED.search(line):
                 limit = LIMIT_OPTION[m[1]]
             elif BRANCH_LIMIT in line:
                 branch = BRANCH_ID.search(line)
-                skipped.setdefault(limit or "an unidentified limit", set()).add(branch[0] if branch else f"{path}:{n}")
+                scan.skipped.setdefault(limit or "an unidentified limit", set()).add(
+                    branch[0] if branch else f"{path}:{n}"
+                )
                 limit = None
-    return aborted, exit_error, skipped, dateless
+        if record is not None and record[1] is not None:
+            read_record(scan, causes, *record)
+    return scan
+
+
+def record_data(line, details):
+    """A record's fields: a JSON line's, or a pretty record's detail lines; {} if they don't parse."""
+    try:
+        data = json.loads(line) if line.startswith("{") else json.loads("{" + "".join(details) + "}")
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def read_record(scan, causes, line, details):
+    """Add one log record to scan. A JSON log has no detail lines: each line is a record."""
+    found = REPOSITORY.search(line)
+    repo = (found[1] or found[2]) if found else NAME
+    if DATELESS in line:
+        held = scan.dateless.setdefault(repo, set())
+        held.update(DEP_NAME.findall(line))
+        for detail in details:
+            held.update(DEP_NAME.findall(detail))
+    elif any(cause in line for cause in CAUSES):
+        causes[repo] = error_message(line, details)
+    elif FINISHED in line:
+        found = next((m for m in map(RESULT.search, [line, *details]) if m), None)
+        if found:
+            scan.results[repo] = (found[1], causes.pop(repo, ""))
+    elif PACKAGE_FILES in line:
+        config = record_data(line, details).get("config")
+        if isinstance(config, dict):
+            add_overdue(scan.overdue, repo, config)
+
+
+def error_message(line, details):
+    """The first line of a record's err.message, or ""."""
+    if line.startswith("{"):
+        err = record_data(line, details).get("err")
+        message = err.get("message") if isinstance(err, dict) else None
+    else:
+        found = next((m for m in map(ERR_MESSAGE.search, details) if m), None)
+        message = json.loads(found[1]) if found else None
+    return message.split("\n")[0][:200] if isinstance(message, str) else ""
+
+
+def add_overdue(overdue, repo, config):
+    """Add the updates of packageFiles (manager -> files) pending for over OVERDUE_DAYS."""
+    for files in config.values():
+        for file in files if isinstance(files, list) else []:
+            for dep in file.get("deps") or []:
+                for update in dep.get("updates") or []:
+                    stamp = update.get("releaseTimestamp")
+                    if not (update.get("pendingChecks") and stamp):
+                        continue
+                    try:
+                        age = (NOW - dt.datetime.fromisoformat(stamp)).days
+                    except (TypeError, ValueError):
+                        continue
+                    if age > OVERDUE_DAYS:
+                        new = update.get("newVersion") or update.get("newValue") or update.get("newDigest")
+                        overdue.setdefault(repo, set()).add((dep.get("depName"), dep.get("currentValue"), new, age))
 
 
 def to_report(runs, failed_before=False):
@@ -308,17 +433,21 @@ def check_renovate():
     new_logs = [(path, mtime) for path, mtime in logs if mtime > since]
     # A branch skipped again by each run is one problem, not one per run.
     aborted, exit_error, limited, skipped, dateless, runs = [], [], {}, {}, {}, []
+    results, overdue = {}, {}  # results: each repository's newest
     for path, _ in new_logs:
-        run_aborted, run_exit_error, run_skipped, run_dateless = scan_log(path)
-        for repo, deps in run_dateless.items():
+        scan = scan_log(path)
+        for repo, deps in scan.dateless.items():
             dateless.setdefault(repo, set()).update(deps)
+        for repo, updates in scan.overdue.items():
+            overdue.setdefault(repo, set()).update(updates)
+        results.update(scan.results)
         name = run_name(path)
-        runs.append((name, run_aborted or run_exit_error))
-        if run_aborted:
+        runs.append((name, scan.aborted or scan.exit_error))
+        if scan.aborted:
             aborted.append(name)
-        if run_exit_error:
+        if scan.exit_error:
             exit_error.append(name)
-        for option, branches in run_skipped.items():
+        for option, branches in scan.skipped.items():
             limited.setdefault(option, []).append(name)
             skipped.setdefault(option, set()).update(branches)
     # Only failures the runs did not recover from (to_report).
@@ -348,6 +477,22 @@ def check_renovate():
                 f"{dep} ({repo}): a release has no release date, so minimumReleaseAge holds it pending for good. "
                 "Look it up in a datasource that dates releases, or give it minimumReleaseAgeBehaviour "
                 "timestamp-optional."
+            )
+
+    # A repository whose newest run failed; one that recovered since is fine.
+    for repo, (result, cause) in sorted(results.items()):
+        if result not in REPOSITORY_OK:
+            problems[f"repo-failed:{repo}:{result}"] = (
+                f"{repo}: Renovate's run ended in {result}"
+                + (f" ({cause})" if cause else "")
+                + ", so it updates nothing there until the cause is fixed."
+            )
+
+    for repo, updates in sorted(overdue.items()):
+        for dep, current_value, new_value, age in sorted(updates, key=str):
+            problems[f"overdue:{repo}:{dep}:{new_value}"] = (
+                f"{dep} {current_value} -> {new_value} ({repo}): released {age} days ago and still pending. "
+                f"No age gate should last {OVERDUE_DAYS} days: check the repository's rules."
             )
 
     current = {}
