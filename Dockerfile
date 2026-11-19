@@ -8,12 +8,16 @@ COPY requirements-uv.txt /tmp/
 RUN pip install --no-cache-dir --root-user-action=ignore --require-hashes -r /tmp/requirements-uv.txt
 # Install exactly what uv.lock pins, checking its hashes, rather than
 # re-resolving pyproject.toml at build time; --locked fails the build when
-# uv.lock is out of date. Bytecode is compiled here because the runtime image
-# sets PYTHONDONTWRITEBYTECODE and runs read-only.
+# uv.lock is out of date. Dependencies first, so their layer survives a change
+# to the code or the docs; then the app itself, as a regular (non-editable)
+# package. Bytecode is compiled here because the runtime image sets
+# PYTHONDONTWRITEBYTECODE and runs read-only.
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv UV_PYTHON=/usr/local/bin/python3 UV_PYTHON_DOWNLOADS=never \
     UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_NO_CACHE=1
 WORKDIR /tmp/build
-COPY pyproject.toml uv.lock README.md LICENSE ./
+COPY pyproject.toml uv.lock ./
+RUN uv sync --locked --no-dev --no-editable --no-install-project
+COPY README.md LICENSE ./
 COPY src/ src/
 RUN uv sync --locked --no-dev --no-editable
 
