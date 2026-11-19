@@ -5,11 +5,13 @@
 renovate-alert is a daily check for a self-hosted
 [Renovate](https://docs.renovatebot.com/) that reports the failures Renovate
 does not alert on, as one [Apprise](https://github.com/caronc/apprise-api)
-digest. It reads Renovate's run logs from a volume or a Google Cloud Storage
-bucket, so it works with a Renovate on any platform, GitLab included. On
-[Forgejo](https://forgejo.org/) or [Gitea](https://about.gitea.com/) it also
+digest. It reads Renovate's run logs from a volume or a
+[Google Cloud Storage](https://cloud.google.com/storage) bucket, so it works
+with a Renovate on any platform, [GitLab](https://about.gitlab.com/) included.
+On [Forgejo](https://forgejo.org/) or [Gitea](https://about.gitea.com/) it also
 reads the Dependency Dashboard and open PRs. An optional second check lists the
-Renovate PRs on GitHub, GitLab and Forgejo that need a person.
+Renovate PRs on [GitHub](https://github.com/), GitLab and Forgejo that need a
+person.
 
 ## What it catches
 
@@ -52,8 +54,11 @@ Renovate writes run logs only when `LOG_FILE` is set: give each run its own
 file on a volume this check can read, such as
 `/logs/renovate-$(date -u +%Y%m%d-%H%M%S).log`, and keep `LOG_FILE_LEVEL` at
 `debug`. For logs in Cloud Storage, see [docs/gcs-logs.md](docs/gcs-logs.md).
-Run the [released image](https://github.com/mbologna/renovate-alert/releases)
-once a day (a CronJob or timer):
+
+The image is `ghcr.io/mbologna/renovate-alert`, built for `linux/amd64` and
+`linux/arm64`. Each [release](https://github.com/mbologna/renovate-alert/releases)
+is tagged `X.Y.Z` and `X.Y`, and the newest also `latest`. Run it once a day
+(a CronJob or timer):
 
 ```sh
 docker run --rm \
@@ -130,13 +135,40 @@ Every variable the code reads:
 
 ## Development
 
+The code is a Python 3.15 package in `src/renovate_alert/`, managed with
+[uv](https://docs.astral.sh/uv/):
+
 ```sh
-uv run pytest --cov    # fails below the coverage gate in pyproject.toml
+uv sync
+uv run pytest --cov    # fails below fail_under (97%) in pyproject.toml
 uv run ruff check . && uv run ruff format --check .
+uv run pre-commit install
+uv run pre-commit run --all-files
 ```
+
+The [pre-commit](https://pre-commit.com/) hooks run
+[ruff](https://docs.astral.sh/ruff/), [mypy](https://mypy-lang.org/),
+[Bandit](https://bandit.readthedocs.io/),
+[hadolint](https://github.com/hadolint/hadolint) and schema checks of the
+workflows and `renovate.json`. CI runs ruff, the tests with the coverage gate
+and [pip-audit](https://github.com/pypa/pip-audit) through
+[mbologna/.github](https://github.com/mbologna/.github)'s `python-ci`
+workflow, then builds, smoke-tests and scans the image with its `docker-ci`
+workflow.
 
 Dependencies resolve only to releases at least 7 days old (`exclude-newer`, uv
 0.12.12 or later), except `apprise-notify`; a newer CVE fix needs a temporary
-`exclude-newer-package` entry. Monday's scheduled CI run releases from the
-Conventional Commits on `main` (a push releases only a CVE fix) and publishes
-the image to GHCR.
+`exclude-newer-package` entry, then `uv lock`. Pull requests merge with a merge
+commit, and every commit subject must follow
+[Conventional Commits](https://www.conventionalcommits.org/). Releases are
+`vX.Y.Z` tags that auto-release cuts from those subjects on CI's Monday
+schedule, or on a push to `main` for a CVE fix; only the tag builds publish the
+image. `pyproject.toml`'s version stays `0.0.0`.
+
+The project skeleton comes from the [Copier](https://copier.readthedocs.io/)
+template [python-app-template](https://github.com/mbologna/python-app-template);
+see [AGENTS.md](AGENTS.md) for the conventions.
+
+## Licence
+
+[MIT](LICENSE).
