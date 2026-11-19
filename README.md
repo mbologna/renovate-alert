@@ -2,358 +2,141 @@
 
 [![CI](https://github.com/mbologna/renovate-alert/actions/workflows/ci.yml/badge.svg)](https://github.com/mbologna/renovate-alert/actions/workflows/ci.yml)
 
-A daily check for a self-hosted [Renovate](https://docs.renovatebot.com/) on
-[Forgejo](https://forgejo.org/) or [Gitea](https://about.gitea.com/). It
-catches the failures Renovate doesn't report, and sends them as one
-[Apprise](https://github.com/caronc/apprise-api) digest.
+renovate-alert is a daily check for a self-hosted
+[Renovate](https://docs.renovatebot.com/) that reports the failures Renovate
+does not alert on, as one [Apprise](https://github.com/caronc/apprise-api)
+digest. It reads Renovate's run logs from a volume or a Google Cloud Storage
+bucket, so it works with a Renovate on any platform, GitLab included. On
+[Forgejo](https://forgejo.org/) or [Gitea](https://about.gitea.com/) it also
+reads the Dependency Dashboard and open PRs. An optional second check lists the
+Renovate PRs on GitHub, GitLab and Forgejo that need a person.
 
-All of these happened without a single error anywhere:
+## What it catches
 
-- **Renovate didn't run:** no run log newer than `RUN_STALE_HOURS`.
-- **A run aborted:** a registry or the forge timed out or failed (an
-  `ExternalHostError`), so Renovate skipped the whole repository, yet exited 0.
-  The log says "External host error causing abort" or
-  `"result": "external-host-error"`.
-- **A run failed:** the log says "Renovate is exiting with a non-zero code" or
-  "... with an error-specific code".
-- **A repository's run failed:** its "Repository finished" record has a
-  result that is an error, such as `unknown-error`, `config-validation`,
-  `forbidden` or `not-found`, so Renovate updates nothing there. It is
-  reported with the repository's name and the first line of the cause, even
-  when Renovate exited 0, until a later run of that repository ends cleanly.
-  Results that mean "nothing to do" (`done`, `automerged`, disabled, fork,
-  archived, no config) and transient ones (`external-host-error`,
-  `rate-limit-exceeded`, `temporary-error`) are not.
-- **A limit kept new branches from being created:** Renovate logs the same
-  debug-level skip line for every limit, so the line before it decides which
-  one is reported (`branchConcurrentLimit`, `prHourlyLimit`,
-  `commitHourlyLimit` or `prCommitsPerRunLimit`). A branch skipped by several
-  runs counts once.
-- **The Dependency Dashboard lists Repository Problems**, each line reported
-  on its own. Two expected warnings are skipped: `timestamp-optional,
-  proceeding` and `Could not determine resolved version after updating
-  package file` (Terraform provider and lock file branches log it every run).
-- **A release has no release date:** under `minimumReleaseAge` with the
-  default `minimumReleaseAgeBehaviour=timestamp-required`, Renovate holds it
-  pending for good and says so in one debug line ("Marking N release(s) as
-  pending, as they do not have a releaseTimestamp"). Each dependency it names
-  is reported once while it stays held. This is the only sign of a dateless
-  update grouped with dated ones: the dashboard's Pending Status Checks lists
-  a branch only when every update in it is pending.
-- **An update is still pending long after its release:** the debug record
-  "packageFiles with updates" (logged by real and `--dry-run=lookup` runs
-  alike) marks it `pendingChecks` though its release is older than
-  `OVERDUE_DAYS`. The age gate should have let it through long ago, so
-  something else holds it.
-- **An update has been stuck too long:** in Rate-Limited (the merge queue isn't
-  draining) or in Pending Status Checks (usually a release with no timestamp
-  for `minimumReleaseAge`).
-- **An automerge PR stays open:** it has the automerge label and hasn't merged
-  within `OPEN_AUTOMERGE_DAYS`.
+From the run logs (rules and matched log lines in [docs/checks.md](docs/checks.md)):
 
-Every run log written since the previous check is read, current (`.log`) and
-rotated (`.log.gz`) alike. Each log is read once: the check remembers the
-newest modification time it has read, and the first check (no state yet) looks
-back `RUN_STALE_HOURS`. Rotating with `gzip` keeps the modification time, so a
-compressed log is not read again.
+- Renovate didn't run: no run log, or none newer than `RUN_STALE_HOURS`.
+- A run aborted on an external host error, though Renovate exited 0.
+- A run exited with an error code.
+- A repository's run ended in an error result (`unknown-error`, `config-validation`, `forbidden`...).
+- A limit (`branchConcurrentLimit`, `prHourlyLimit`...) kept new branches from being created.
+- A release has no release date, so `minimumReleaseAge` holds it pending for good.
+- An update is still pending more than `OVERDUE_DAYS` after its release.
 
-A failed run (aborted or failed, above) is reported only when Renovate did not
-recover from it:
+From the Forgejo/Gitea API, with `FORGE_API` set:
 
-- the newest run failed too, so no later run succeeded; or
-- it is one of two or more failed runs in a row, even if a later run
-  succeeded. The newest run of the previous check counts towards the streak.
+- The Dependency Dashboard lists Repository Problems.
+- An update has sat in Rate-Limited or Pending Status Checks too long.
+- An automerge PR has stayed open longer than `OPEN_AUTOMERGE_DAYS`.
 
-A single failure that the next run recovered from, such as one `git
-ls-remote` to the forge timing out, is not reported. Neither is a Renovate
-that fails every other run, as long as the newest run succeeds; one that keeps
-failing is reported by the first check after its failures start.
+With `NEEDS_YOU` ([docs/needs-you.md](docs/needs-you.md)) and the upkeep checks
+([docs/upkeep.md](docs/upkeep.md)), each switched on by itself:
 
-Each problem is reported once, and again only if it goes away and comes back:
-a run failure counts as gone once a check reads none worth a report. The first time
-each update was seen, how far the logs have been read, and what has been
-reported, are kept in `STATE_DIR/alert-state.json`. A digest that Apprise doesn't
-accept is retried on the next run, logs included, and that run exits non-zero
-so the failure is visible.
+- A Renovate PR is held for manual review, or its CI failed.
+- The Renovate app has stopped visiting a GitHub repository.
+- GitLab CI minutes or namespace storage are near the quota.
+- `GITHUB_TOKEN` or `GITLAB_TOKEN` expires soon.
+- GitHub disabled a scheduled workflow for inactivity.
+- A Renovate config holds versions back (`allowedVersions`), listed every fourth Monday.
 
-A second, optional check (`NEEDS_YOU`, below) lists the Renovate PRs that
-need a person, on GitHub, GitLab and Forgejo: the ones held for manual review,
-and the ones whose CI failed. On GitHub it also lists the repositories the
-Renovate app has stopped visiting. Four more checks can add to that list, each
-switched on by itself: GitLab CI minutes and storage near the quota, tokens
-about to expire, GitHub workflows disabled for inactivity, and a monthly list
-of version holds in a Renovate config (see [Upkeep checks](#upkeep-checks)).
+## Needs you
 
-## Configuration
+`NEEDS_YOU=on` sends the entries above as a second message, apart from the
+digest, grouped by forge and repository with each one's reason and age;
+`NEEDS_YOU=only` sends it alone. It goes out when something new appears, and as
+a Monday reminder while the list isn't empty.
 
-| Variable | Required | Default | |
-|---|---|---|---|
-| `FORGE_API` | no | | API base URL, e.g. `https://codeberg.org/api/v1`. Unset: run logs only (see below) |
-| `REPOSITORY` | with `FORGE_API` | | `owner/repo` that Renovate runs on |
-| `DASHBOARD_ISSUE` | with `FORGE_API` | | Issue number of the Dependency Dashboard |
-| `RENOVATE_TOKEN` | with `FORGE_API` | | Token that can read the repo's issues and PRs |
-| `APPRISE_URL` | yes | | Apprise notify URL, e.g. `http://apprise:8000/notify/alerts` |
-| `LOG_DIR` | no | `/logs` | Directory holding Renovate's run logs and the state file |
-| `LOG_SOURCE` | no | | `gs://bucket[/prefix]`: read the run logs from Google Cloud Storage instead of `LOG_DIR` (see below) |
-| `STATE_DIR` | no | `LOG_DIR` | Directory for the state files |
-| `WEB_URL` | no | `FORGE_API` without `/api/v1` | Base URL for the dashboard link |
-| `LOG_PREFIX` | no | `renovate-` | Run logs are `LOG_PREFIX*.log[.gz]` |
-| `STATE_FILE` | no | `alert-state.json` | State file name in `STATE_DIR`; give each check its own |
-| `NAME` | no | `REPOSITORY` | Name in the digest title |
-| `AUTOMERGE_LABEL` | no | `renovate-automerge` | Label that marks automerge PRs |
-| `RUN_STALE_HOURS` | no | `26` | Hours without a run log before it reports one missing; also how far back the first check reads logs |
-| `PENDING_DAYS` | no | `35` | Days in Pending Status Checks before an update counts as stuck |
-| `RATE_LIMITED_DAYS` | no | `10` | Days in Rate-Limited before an update counts as stuck |
-| `OPEN_AUTOMERGE_DAYS` | no | `8` | Days an automerge PR may stay open |
-| `OVERDUE_DAYS` | no | `95` | Days since its release after which a still-pending update is reported |
+## Run it
 
-Without `FORGE_API` the check reads the run logs only (missing runs, aborted or
-failed runs, failed repositories, the branch limit, releases with no date,
-overdue updates), for a Renovate on a
-platform it can't query, such as GitLab. Two Renovates can share `LOG_DIR` if their logs use different
-`LOG_PREFIX`es; run one check per prefix, each with its own `STATE_FILE`.
-
-Renovate only writes run logs when it's told to. Set `LOG_FILE` to a
-per-run path on a volume this check can read, e.g.
-`/logs/renovate-$(date -u +%Y%m%d-%H%M%S).log`. Keep `LOG_FILE_LEVEL` at its
-default, `debug`: the branch limits and dateless releases are logged only at
-that level.
-
-### Logs in Google Cloud Storage
-
-When Renovate runs somewhere this check can't mount a volume from, such as a
-Cloud Run job writing `LOG_FILE` to a Cloud Storage volume mount, set
-`LOG_SOURCE=gs://bucket[/prefix]`. The check lists the objects named
-`<prefix>/LOG_PREFIX*.log` or `.log.gz` (one level, no subfolders) and reads
-each new one through the Cloud Storage JSON API, using an object's last update
-time as the log's modification time. The state files stay local, in
-`STATE_DIR`, so the check still needs a small writable volume.
-
-It authenticates with a service account key file named by
-`GOOGLE_APPLICATION_CREDENTIALS`, exchanged for a token with the read-only
-`devstorage.read_only` scope. Give the account `roles/storage.objectViewer` on
-that bucket and nothing else. No Google client library is needed: the token
-request is signed with the standard library.
-
-```yaml
-env:
-  - name: LOG_SOURCE
-    value: gs://renovate-logs
-  - name: STATE_DIR
-    value: /state
-  - name: GOOGLE_APPLICATION_CREDENTIALS
-    value: /var/run/secrets/gcs/key.json
-```
-
-## PRs that need you
-
-With `NEEDS_YOU=on` each run also reads the open Renovate PRs on up to three
-forges and sends one more Apprise message listing those that need a person,
-grouped by forge and repository, each with its title, URL, reason and age in
-days. `NEEDS_YOU=only` runs this check alone, without the run log checks.
-
-A PR needs you when:
-
-- **it waits for a manual review:** it has the `MANUAL_REVIEW_LABEL` label, or
-  lacks `AUTOMERGE_LABEL`. If its body has a line starting with "Why this waits
-  for you" (emoji and bold markup aside), that line is quoted under it;
-- **its CI failed:** a check on its head commit failed. GitHub: a check run
-  concluded `failure`, `timed_out` or `startup_failure`, or a commit status is
-  `failure` or `error`; with a token that can't read check runs, a GitHub
-  Actions workflow run concluded one of those or `action_required`, and the
-  workflow is named. GitLab: the head pipeline failed; the failed jobs that
-  aren't allowed to fail are named. Forgejo: the combined commit status is
-  `failure` or `error`.
-
-Pending or running CI doesn't count, nor do draft PRs.
-
-On GitHub, a repository is listed too when **Renovate hasn't visited it**: its
-Dependency Dashboard (the open issue titled `DASHBOARD_TITLE`) has an
-"Awaiting Schedule" section and hasn't changed in `DASHBOARD_STALE_DAYS`. The
-hosted Renovate app visits quiet repositories irregularly. A visit in the
-schedule window opens the updates awaiting it, which changes the dashboard, so
-one that still lists them after 8 days means a whole weekly window passed with
-no visit. A quiet repository with nothing awaiting rightly stays unchanged for
-months, and is not listed. The default suits schedules that come round at
-least weekly; raise `DASHBOARD_STALE_DAYS` for longer ones, or set it to `0` to
-turn this off. The entry links the dashboard and says how many days it's been.
-
-The message is sent when something new appears: a PR, or a new reason for one
-already listed (its CI going red, say). A PR that merely stays open is not
-repeated, nor is a dashboard that goes another day without a visit. One that
-goes away (merged, CI fixed, visited) sends nothing; if it comes back, it is
-new again. On Mondays the full list goes out as a reminder, if it
-isn't empty. What was last sent is kept in `STATE_DIR/needs-you-state.json`,
-keyed by PR URL and reason.
-
-A forge that can't be read (after one retry on a timeout or a 5xx) keeps the
-PRs from its last good read, so a day of 504s neither drops them nor makes
-them new; the run then exits non-zero. Forgejo calls wait up to 120 seconds:
-Codeberg's PR list can take 30.
-
-Each forge is checked only if its token is set:
-
-| Variable | Required | Default | |
-|---|---|---|---|
-| `NEEDS_YOU` | no | `off` | `on`: run this check as well; `only`: run it alone |
-| `GITHUB_TOKEN` | no | | Token for GitHub (scopes below) |
-| `GITHUB_OWNER` | with `GITHUB_TOKEN` | | User or organisation: searches `is:pr is:open author:app/renovate user:<owner>` |
-| `GITLAB_TOKEN` | no | | Token for GitLab |
-| `GITLAB_URL` | no | `https://gitlab.com` | GitLab base URL |
-| `GITLAB_NAMESPACE` | with `GITLAB_TOKEN` | | Group (subgroups included) or user whose projects' MRs are read; only MRs from `renovate/` branches count |
-| `FORGEJO_TOKEN` | no | | Token for Forgejo or Gitea |
-| `FORGEJO_URL` | with `FORGEJO_TOKEN` | | Base URL, e.g. `https://codeberg.org` |
-| `FORGEJO_REPOS` | with `FORGEJO_TOKEN` | | Comma-separated `owner/repo`s; only PRs from `renovate/` branches count |
-| `AUTOMERGE_LABEL` | no | `renovate-automerge` | As above: a PR without it waits for a review |
-| `MANUAL_REVIEW_LABEL` | no | `manual-review` | Label of a PR held for review |
-| `DASHBOARD_TITLE` | no | `🤖 Renovate Dependency Dashboard` | Exact title of the GitHub Dependency Dashboard issues |
-| `DASHBOARD_STALE_DAYS` | no | `8` | Days a GitHub dashboard with updates awaiting schedule may go unchanged; `0`: off |
-| `NEEDS_YOU_STATE_FILE` | no | `needs-you-state.json` | State file name in `STATE_DIR` |
-
-The GitHub search covers the PRs of the Mend Renovate app. The dashboards
-come from a second search, `is:issue is:open in:title "Renovate Dependency
-Dashboard" user:<owner>`, which keeps only the issues titled exactly
-`DASHBOARD_TITLE`. On GitLab and Forgejo, a self-hosted Renovate's PRs are told apart by their `renovate/`
-branch, whoever authored them. A GitLab group's MRs are read in one listing; a
-user namespace has none, so its projects are read one by one.
-
-Tokens, all read-only:
-
-- **GitHub:** a fine-grained token for the owner's repositories, private
-  ones included, with Pull requests, Issues, Contents, Commit statuses and
-  Actions set to read. Fine-grained tokens can't read check runs (403, or 404
-  on a private repository), so the check then reads the head commit's GitHub
-  Actions workflow runs instead, which the Actions permission covers. A
-  classic token works too: one with no scopes for public repositories only,
-  with the `repo` scope for private ones. The search returns the private
-  repositories the token can read.
-- **GitLab:** a personal, group or project access token with `read_api`.
-  `GITLAB_USAGE` also needs the token's user to own the namespace.
-- **Forgejo:** a token with `read:repository` and `read:issue`.
-
-### Upkeep checks
-
-Four more checks add entries to the same message, under the same rules: an
-entry is sent when it first appears or gains a new reason, and again in the
-Monday reminder while it lasts. A number that merely changes (more minutes
-used, a token a day closer to expiry) is no news. Each is off unless switched
-on, and each reads with the forge tokens above. A check that can't be read
-keeps its entries from the last good read and fails the run, as a forge does.
-
-- **GitLab usage** (`GITLAB_USAGE=on`): the CI minutes `GITLAB_NAMESPACE` has
-  used this month, against `GITLAB_MINUTES_QUOTA`, and the same projected
-  linearly to the end of the month. It is listed once the minutes used reach
-  `GITLAB_MINUTES_WARN` percent of the quota, or the projection reaches
-  `GITLAB_MINUTES_PROJECTED_WARN` percent. No projection is made in the first
-  `GITLAB_MINUTES_PROJECT_AFTER_DAYS` days of a month, when one build would
-  project to thirty. The namespace's storage, with its container registry
-  share, is listed above `GITLAB_STORAGE_WARN` percent of
-  `GITLAB_STORAGE_LIMIT_GIB`. Both come from GitLab's GraphQL API
-  (`ciMinutesUsage`, `namespace.rootStorageStatistics`), which works for a
-  user namespace and a group alike. They need the `read_api` scope (or `api`)
-  and the namespace's owner; without the scope the check says so in the log
-  and skips, sending nothing.
-- **Token expiry** (`TOKEN_EXPIRY=on`): `GITHUB_TOKEN` and `GITLAB_TOKEN` are
-  listed within `TOKEN_EXPIRY_DAYS` of their expiry. GitHub's comes from the
-  `github-authentication-token-expiration` header of an authenticated call
-  (`/rate_limit`), GitLab's from `GET /personal_access_tokens/self`. A token
-  with no expiry date is not listed; nor is a Forgejo token, as Forgejo
-  tokens don't expire. The log gives each date; token values are never
-  printed.
-- **Disabled workflows** (`DISABLED_WORKFLOWS=on`): GitHub workflows in
-  `GITHUB_OWNER`'s non-archived repositories whose state is
-  `disabled_inactivity`. GitHub stops scheduled workflows in a public
-  repository after 60 days without activity, without telling anyone. The
-  repositories come from a search (`user:<owner> archived:false`), the
-  workflows from `GET /repos/{owner}/{repo}/actions/workflows`, which the
-  fine-grained token's Actions permission covers.
-- **Version holds** (`VERSION_HOLDS=on`): every `packageRules` entry with
-  `allowedVersions` in `HOLDS_FILE` (JSON, not JSON5) of `HOLDS_REPO`, read
-  through `HOLDS_FORGE`'s API from the default branch. Each is listed with
-  what it matches and its `description`, so a hold put in place until
-  something upstream changes isn't forgotten. The holds are no news by
-  themselves: they go out every fourth Monday (28 days apart), in that day's
-  message, and on the first run after the check is switched on. A delivery
-  that fails is retried on the next run.
-
-| Variable | Default | |
-|---|---|---|
-| `GITLAB_USAGE` | `off` | `on`: list GitLab CI minutes and storage near the quota; needs `GITLAB_TOKEN` and `GITLAB_NAMESPACE` |
-| `GITLAB_MINUTES_QUOTA` | `400` | Monthly CI minutes (the Free tier's) |
-| `GITLAB_MINUTES_WARN` | `75` | Percent of the quota used that lists it |
-| `GITLAB_MINUTES_PROJECTED_WARN` | `100` | Percent of the quota projected by the end of the month that lists it |
-| `GITLAB_MINUTES_PROJECT_AFTER_DAYS` | `7` | Days into the month before minutes are projected |
-| `GITLAB_STORAGE_LIMIT_GIB` | `5` | Namespace storage limit in GiB |
-| `GITLAB_STORAGE_WARN` | `80` | Percent of the storage limit that lists it |
-| `TOKEN_EXPIRY` | `off` | `on`: list the GitHub and GitLab tokens close to expiry |
-| `TOKEN_EXPIRY_DAYS` | `30` | Days before expiry that list a token |
-| `DISABLED_WORKFLOWS` | `off` | `on`: list GitHub workflows disabled for inactivity; needs `GITHUB_TOKEN` and `GITHUB_OWNER` |
-| `VERSION_HOLDS` | `off` | `on`: list the version holds every fourth Monday; needs `HOLDS_REPO` and the token of `HOLDS_FORGE` |
-| `HOLDS_FORGE` | `forgejo` | `forgejo` (`FORGEJO_URL`), `github` or `gitlab` (`GITLAB_URL`) |
-| `HOLDS_REPO` | | `owner/repo` holding the Renovate config |
-| `HOLDS_FILE` | `renovate.json` | Path of the config in `HOLDS_REPO` |
-
-For example, in a Kubernetes CronJob alongside the run log checks:
-
-```yaml
-env:
-  - name: NEEDS_YOU
-    value: "on"
-  - name: AUTOMERGE_LABEL
-    value: automerge
-  - name: GITHUB_OWNER
-    value: owner
-  - name: GITLAB_NAMESPACE
-    value: owner
-  - name: FORGEJO_URL
-    value: https://codeberg.org
-  - name: FORGEJO_REPOS
-    value: owner/infra
-  - name: GITLAB_USAGE
-    value: "on"
-  - name: TOKEN_EXPIRY
-    value: "on"
-  - name: DISABLED_WORKFLOWS
-    value: "on"
-  - name: VERSION_HOLDS
-    value: "on"
-  - name: HOLDS_REPO
-    value: owner/infra
-  - name: GITHUB_TOKEN
-    valueFrom:
-      secretKeyRef: {name: renovate-alert, key: GITHUB_TOKEN}
-  - name: GITLAB_TOKEN
-    valueFrom:
-      secretKeyRef: {name: renovate-alert, key: GITLAB_TOKEN}
-  - name: FORGEJO_TOKEN
-    valueFrom:
-      secretKeyRef: {name: renovate-alert, key: FORGEJO_TOKEN}
-```
-
-## Running
+Renovate writes run logs only when `LOG_FILE` is set: give each run its own
+file on a volume this check can read, such as
+`/logs/renovate-$(date -u +%Y%m%d-%H%M%S).log`, and keep `LOG_FILE_LEVEL` at
+`debug`. For logs in Cloud Storage, see [docs/gcs-logs.md](docs/gcs-logs.md).
+Run the [released image](https://github.com/mbologna/renovate-alert/releases)
+once a day (a CronJob or timer):
 
 ```sh
 docker run --rm \
-  -e FORGE_API=https://codeberg.org/api/v1 -e REPOSITORY=owner/repo \
-  -e DASHBOARD_ISSUE=1 -e RENOVATE_TOKEN=... \
+  -e FORGE_API=https://forgejo.example.org/api/v1 -e REPOSITORY=owner/repo \
+  -e DASHBOARD_ISSUE=1 -e RENOVATE_TOKEN=<token> \
   -e APPRISE_URL=http://apprise:8000/notify/alerts \
   -v renovate-logs:/logs \
-  ghcr.io/mbologna/renovate-alert:1.0.0
+  ghcr.io/mbologna/renovate-alert:<version>
 ```
 
-The image runs as uid 1000 and works with a read-only root filesystem. It
-only needs write access to `STATE_DIR` (`LOG_DIR` unless set), for the state files.
+The image runs as uid 1000, works with a read-only root filesystem and writes
+only to `STATE_DIR` (`LOG_DIR` unless set). `RENOVATE_TOKEN` needs read access
+to `REPOSITORY`'s issues and PRs (Forgejo scopes `read:repository` and
+`read:issue`); the read-only needs-you tokens are listed in
+[docs/needs-you.md](docs/needs-you.md#tokens).
+
+## Configuration
+
+Every variable the code reads:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| **Run logs and delivery** | | |
+| `APPRISE_URL` | required | Apprise API notify URL, e.g. `http://apprise:8000/notify/alerts`; several, space-separated, are tried in order until one delivers |
+| `NAME` | `REPOSITORY`, else `Renovate` | Name in the digest title |
+| `LOG_DIR` | `/logs` | Directory holding the run logs `LOG_PREFIX*.log*` |
+| `LOG_PREFIX` | `renovate-` | File name prefix of the run logs |
+| `LOG_SOURCE` | | `gs://bucket[/prefix]`: read the logs from Cloud Storage instead of `LOG_DIR` |
+| `GOOGLE_APPLICATION_CREDENTIALS` | | Service account key file, needed with `LOG_SOURCE` |
+| `STATE_DIR` | `LOG_DIR` | Directory for the state files |
+| `STATE_FILE` | `alert-state.json` | State file of the run log and forge checks; one per check sharing `STATE_DIR` |
+| `RUN_STALE_HOURS` | `26` | Hours without a new run log before Renovate counts as not running; first check's look-back |
+| `OVERDUE_DAYS` | `95` | Days after its release that a still-pending update is reported |
+| `NEEDS_YOU` | `off` | `on`: also list the PRs that need you; `only`: list them alone |
+| **Forgejo/Gitea dashboard and PRs** | | |
+| `FORGE_API` | | API base, e.g. `https://forgejo.example.org/api/v1`; unset: run logs only |
+| `CODEBERG_API` | | Old name of `FORGE_API`, read when `FORGE_API` is unset |
+| `REPOSITORY` | | `owner/repo` Renovate runs on; required with `FORGE_API` |
+| `DASHBOARD_ISSUE` | | Issue number of its Dependency Dashboard; required with `FORGE_API` |
+| `RENOVATE_TOKEN` | | Token that reads its issues and PRs; required with `FORGE_API` |
+| `WEB_URL` | `FORGE_API` without `/api/v1` | Base URL of the dashboard link |
+| `AUTOMERGE_LABEL` | `renovate-automerge` | Label of automerge PRs; a needs-you PR without it waits for review |
+| `PENDING_DAYS` | `35` | Days in Pending Status Checks before an update counts as stuck |
+| `RATE_LIMITED_DAYS` | `10` | Days in Rate-Limited before an update counts as stuck |
+| `OPEN_AUTOMERGE_DAYS` | `8` | Days an automerge PR may stay open |
+| **Needs you** | | |
+| `GITHUB_TOKEN` | | Reads GitHub; unset: GitHub is skipped |
+| `GITHUB_OWNER` | | User or organisation whose PRs are read; required with `GITHUB_TOKEN` |
+| `GITLAB_TOKEN` | | Reads GitLab; unset: GitLab is skipped |
+| `GITLAB_URL` | `https://gitlab.com` | GitLab base URL |
+| `GITLAB_NAMESPACE` | | Group (with subgroups) or user whose MRs are read; required with `GITLAB_TOKEN` |
+| `FORGEJO_TOKEN` | | Reads Forgejo or Gitea; unset: skipped |
+| `FORGEJO_URL` | | Base URL, e.g. `https://forgejo.example.org`; required with `FORGEJO_TOKEN` |
+| `FORGEJO_REPOS` | | Comma-separated `owner/repo`s; required with `FORGEJO_TOKEN` |
+| `MANUAL_REVIEW_LABEL` | `manual-review` | Label of a PR held for review |
+| `DASHBOARD_TITLE` | `🤖 Renovate Dependency Dashboard` | Exact title of the GitHub dashboard issues |
+| `DASHBOARD_STALE_DAYS` | `8` | Days a GitHub dashboard awaiting schedule may go unchanged; `0`: off |
+| `NEEDS_YOU_STATE_FILE` | `needs-you-state.json` | State file of this check, in `STATE_DIR` |
+| **Upkeep checks** | | |
+| `GITLAB_USAGE` | `off` | `on`: list GitLab CI minutes and storage near the quota |
+| `GITLAB_MINUTES_QUOTA` | `400` | Monthly CI minutes |
+| `GITLAB_MINUTES_WARN` | `75` | Percent of the quota used that lists it |
+| `GITLAB_MINUTES_PROJECTED_WARN` | `100` | Percent of the quota projected by month end that lists it |
+| `GITLAB_MINUTES_PROJECT_AFTER_DAYS` | `7` | Days into the month before minutes are projected |
+| `GITLAB_STORAGE_LIMIT_GIB` | `5` | Namespace storage limit in GiB (decimals allowed) |
+| `GITLAB_STORAGE_WARN` | `80` | Percent of the storage limit that lists it |
+| `TOKEN_EXPIRY` | `off` | `on`: list `GITHUB_TOKEN` and `GITLAB_TOKEN` close to expiry |
+| `TOKEN_EXPIRY_DAYS` | `30` | Days before expiry that list a token |
+| `DISABLED_WORKFLOWS` | `off` | `on`: list GitHub workflows disabled for inactivity |
+| `VERSION_HOLDS` | `off` | `on`: list the config's version holds every fourth Monday |
+| `HOLDS_FORGE` | `forgejo` | Forge of `HOLDS_REPO`: `forgejo`, `github` or `gitlab` |
+| `HOLDS_REPO` | | `owner/repo` holding the Renovate config; required with `VERSION_HOLDS` |
+| `HOLDS_FILE` | `renovate.json` | Path of the config (JSON) in `HOLDS_REPO` |
 
 ## Development
 
 ```sh
-uv run pytest
+uv run pytest --cov    # fails below the coverage gate in pyproject.toml
 uv run ruff check . && uv run ruff format --check .
 ```
 
-Dependencies resolve only to releases at least 7 days old (`exclude-newer`
-in `pyproject.toml`, which needs uv 0.12.12 or later), and the image installs
-exactly what `uv.lock` pins. To take a CVE fix released less than 7 days ago,
-add the package to `exclude-newer-package` as `<name> = false`, run `uv lock`,
-and remove the entry once the release is a week old. Own packages
-(`apprise-notify`) are exempt permanently.
+Dependencies resolve only to releases at least 7 days old (`exclude-newer`, uv
+0.12.12 or later), except `apprise-notify`; a newer CVE fix needs a temporary
+`exclude-newer-package` entry. Monday's scheduled CI run releases from the
+Conventional Commits on `main` (a push releases only a CVE fix) and publishes
+the image to GHCR.
