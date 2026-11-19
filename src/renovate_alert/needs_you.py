@@ -120,13 +120,13 @@ def fetch(url, headers, timeout=TIMEOUT, data=None, with_headers=False):
     req = urllib.request.Request(url, headers=headers, data=data)
     for attempt in (1, 2):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with urllib.request.urlopen(req, timeout=timeout) as r:  # nosec B310: forge API URLs, set by the operator
                 body = json.load(r)
                 return (body, r.headers) if with_headers else body
         except urllib.error.HTTPError as e:
             if e.code < 500 or attempt == 2:
                 raise
-        except (urllib.error.URLError, TimeoutError):
+        except urllib.error.URLError, TimeoutError:
             if attempt == 2:
                 raise
         time.sleep(RETRY_DELAY)
@@ -597,7 +597,7 @@ def run():
     try:
         with open(STATE) as f:
             state = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except FileNotFoundError, json.JSONDecodeError:
         state = {}
     previous = state.get("items", {})
     read, errors, items = {}, [], []

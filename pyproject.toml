@@ -1,11 +1,20 @@
 [project]
 name = "renovate-alert"
-version = "1.0.0"
-description = "Alert when a self-hosted Renovate on Forgejo or Gitea stops keeping up, instead of failing silently"
+# A placeholder, never bumped: a release is the git tag vX.Y.Z that
+# auto-release creates, and the image built from that tag carries the
+# version in its org.opencontainers.image.version label. Nothing reads this
+# field at run time.
+version = "0.0.0"
+description = "Daily check for the failures a self-hosted Renovate on Forgejo or Gitea doesn't report: missed or aborted runs, branch limits, stuck updates and automerge PRs that never merge, sent as one Apprise digest"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.11"
-dependencies = ["apprise-notify>=1.2.0"]
+authors = [{ name = "Michele Bologna" }]
+# The Python the Dockerfile's base image ships; Renovate moves the image,
+# a person moves this floor with the next minor.
+requires-python = ">=3.15"
+dependencies = [
+    "apprise-notify>=1.2.0",
+]
 
 [project.scripts]
 renovate-alert = "renovate_alert:main"
@@ -14,35 +23,60 @@ renovate-alert = "renovate_alert:main"
 requires = ["uv_build>=0.13,<0.14"]
 build-backend = "uv_build"
 
+[dependency-groups]
+dev = [
+    "pre-commit>=4.5.1",
+    "pytest>=9.0.3",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.17.0",
+]
+
 [tool.uv]
 required-version = ">=0.12.12"
 # Resolve only releases at least 7 days old, so a compromised release has
-# time to be caught and yanked before it lands in uv.lock. Relative values
-# need uv 0.12.12+; setup-uv in CI reads required-version too.
+# time to be caught and yanked before it lands in uv.lock. For an urgent
+# fix, add `<name> = false` to exclude-newer-package and run `uv lock`.
 exclude-newer = "7 days"
-# Own packages are exempt, so a fix released there can be picked up at once.
 # apprise-notify is my own package on PyPI: exempt, so a fix released there
 # is picked up at once.
 exclude-newer-package = { apprise-notify = false }
 
-[dependency-groups]
-dev = ["pytest>=9.0.3", "pytest-cov>=7.1.0", "ruff>=0.8.0"]
-
 [tool.ruff]
 line-length = 120
-target-version = "py311"
+target-version = "py315"
 
 [tool.ruff.lint]
-select = ["E", "W", "F", "I", "B", "C4", "UP"]
-ignore = ["E501"]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (the formatter handles it)
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --strict-markers"
 
+[tool.bandit]
+exclude_dirs = ["tests"]
+
 [tool.coverage.run]
 source = ["renovate_alert"]
+# `python -m renovate_alert` only calls main().
+omit = ["*/__main__.py"]
 
 [tool.coverage.report]
-# The current total, rounded down: CI fails when coverage drops below it.
+# CI fails below this total (python-ci and ci-templates' python-test read
+# it). Raise it with the tests; don't lower it to merge.
 fail_under = 97
+show_missing = true

@@ -98,7 +98,7 @@ def token(now=None):
     body = urllib.parse.urlencode(
         {"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer", "assertion": assertion}
     ).encode()
-    with urllib.request.urlopen(urllib.request.Request(uri, data=body), timeout=TIMEOUT) as r:
+    with urllib.request.urlopen(urllib.request.Request(uri, data=body), timeout=TIMEOUT) as r:  # nosec B310: token_uri from the operator's key file
         got = json.load(r)
     _token.update(value=got["access_token"], expires=now + got.get("expires_in", 3600))
     return _token["value"]
@@ -106,7 +106,7 @@ def token(now=None):
 
 def _open(url):
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token()}"})
-    return urllib.request.urlopen(req, timeout=TIMEOUT)
+    return urllib.request.urlopen(req, timeout=TIMEOUT)  # nosec B310: always the https GCS API
 
 
 def list_objects(bucket, prefix):

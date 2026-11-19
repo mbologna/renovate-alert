@@ -198,12 +198,12 @@ def get(path, sleep=time.sleep):
     req = urllib.request.Request(f"{API}/repos/{REPO}/{path}", headers={"Authorization": f"token {TOKEN}"})
     for attempt in range(1, READ_ATTEMPTS + 1):
         try:
-            with urllib.request.urlopen(req, timeout=READ_TIMEOUT_SECONDS) as r:
+            with urllib.request.urlopen(req, timeout=READ_TIMEOUT_SECONDS) as r:  # nosec B310: FORGE_API, set by the operator
                 return json.load(r)
         except urllib.error.HTTPError as e:
             if e.code not in (502, 503, 504) or attempt == READ_ATTEMPTS:
                 raise
-        except (urllib.error.URLError, TimeoutError):
+        except urllib.error.URLError, TimeoutError:
             if attempt == READ_ATTEMPTS:
                 raise
         sleep(READ_RETRY_SECONDS * attempt)
@@ -361,7 +361,7 @@ def add_overdue(overdue, repo, config):
                         continue
                     try:
                         age = (NOW - dt.datetime.fromisoformat(stamp)).days
-                    except (TypeError, ValueError):
+                    except TypeError, ValueError:
                         continue
                     if age > OVERDUE_DAYS:
                         new = update.get("newVersion") or update.get("newValue") or update.get("newDigest")
@@ -407,7 +407,7 @@ def check_renovate():
     try:
         with open(STATE) as f:
             state = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except FileNotFoundError, json.JSONDecodeError:
         state = {}
     seen = state.get("first_seen", {})
     alerted = set(state.get("alerted", []))
