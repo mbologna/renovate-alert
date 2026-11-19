@@ -1,8 +1,13 @@
+.env
 .git
 .github
+.gitlab-ci.yml
 .venv
 tests
 __pycache__
 *.pyc
 .pytest_cache
+.ruff_cache
 .coverage
+coverage.xml
+dist
