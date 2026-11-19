@@ -11,8 +11,12 @@ apprise-notify = false
 
 [[package]]
 name = "apprise-notify"
-version = "1.0.0"
-source = { git = "https://github.com/mbologna/apprise-notify-py?rev=v1.0.0#29e828196f6f381b83eaa454a04ba362c6f7dff9" }
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/3a/bd/229e81bfd989af33a895ce23cdc250d77539b9adc5e07c97249e7569c542/apprise_notify-1.2.0.tar.gz", hash = "sha256:7169e71e2ed3c3801ac201392d911de381c9e3af326862fbdc52dcde400536ac", size = 4657, upload-time = "2026-11-16T11:49:45.581Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/97/4e/5d04764a6ec3cd755bf815ada40c21b5ab17c13d38e30a8e771ff3b3559d/apprise_notify-1.2.0-py3-none-any.whl", hash = "sha256:7940afa5dcb075d32f62cdd639ac8bda70e779224dc53ee2f4b81475ea65a04d", size = 4938, upload-time = "2026-11-16T11:49:44.538Z" },
+]
 
 [[package]]
 name = "colorama"
@@ -231,7 +235,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "apprise-notify", git = "https://github.com/mbologna/apprise-notify-py?rev=v1.0.0" }]
+requires-dist = [{ name = "apprise-notify", specifier = ">=1.2.0" }]
 
 [package.metadata.requires-dev]
 dev = [
