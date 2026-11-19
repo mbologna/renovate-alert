@@ -23,6 +23,8 @@ repos:
       - id: trailing-whitespace
       - id: check-case-conflict
       - id: detect-private-key
+        # The test wraps a key it generates at run time in PEM markers.
+        exclude: ^tests/test_gcs\.py$
 
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v2.4.1
