@@ -160,14 +160,21 @@ Dependencies resolve only to releases at least 7 days old (`exclude-newer`, uv
 0.12.12 or later), except `apprise-notify`; a newer CVE fix needs a temporary
 `exclude-newer-package` entry, then `uv lock`. Pull requests merge with a merge
 commit, and every commit subject must follow
-[Conventional Commits](https://www.conventionalcommits.org/). Releases are
-`vX.Y.Z` tags that auto-release cuts from those subjects on CI's Monday
-schedule, or on a push to `main` for a CVE fix; only the tag builds publish the
-image. `pyproject.toml`'s version stays `0.0.0`.
+[Conventional Commits](https://www.conventionalcommits.org/); they decide the
+next release ([Versioning](#versioning)).
 
 The project skeleton comes from the [Copier](https://copier.readthedocs.io/)
 template [python-app-template](https://github.com/mbologna/python-app-template);
 see [AGENTS.md](AGENTS.md) for the conventions.
+
+## Versioning
+
+Releases follow SemVer: [auto-release](https://github.com/mbologna/auto-release)
+tags `vX.Y.Z` from the Conventional Commit types (`feat` minor; `fix`, `perf`,
+`revert` patch; a breaking change major) on CI's Monday schedule, or on a push
+to `main` for a CVE fix. Only the tag builds publish the image, as `X.Y.Z`,
+`X.Y` and `latest`. `pyproject.toml`'s version stays `0.0.0`. See the
+[versioning standard](https://github.com/mbologna/.github/blob/main/VERSIONING.md).
 
 ## Licence
 
