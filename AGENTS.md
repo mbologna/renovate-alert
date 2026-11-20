@@ -18,7 +18,6 @@ Daily check for the failures a self-hosted Renovate on Forgejo or Gitea doesn't 
   ships in the weekly maintenance release). CI lints every commit with
   [commitlint-config-mbologna](https://github.com/mbologna/commitlint-config)
   and rejects `fixup!` commits; pull requests merge with a merge commit.
-- Releases are tags; `pyproject.toml`'s version stays `0.0.0`.
 - Coverage may not drop below `fail_under` in `pyproject.toml`; raise it
   when tests are added.
 - Dependencies: `uv add <pkg>`; uv.lock is committed and the image installs
@@ -28,6 +27,19 @@ Daily check for the failures a self-hosted Renovate on Forgejo or Gitea doesn't 
   order. It never raises; check its return value when sending matters.
 - The image: non-root (uid 1000), no pip, nothing written outside `/tmp`
   or `STATE_DIR` (the mounted `LOG_DIR` unless set).
+
+## Versioning
+
+Plain SemVer: `vX.Y.Z` tags, each publishing the image
+`ghcr.io/mbologna/renovate-alert` as `X.Y.Z`, `X.Y` and `latest`, per the
+[versioning standard](https://github.com/mbologna/.github/blob/main/VERSIONING.md).
+
+- Never create, move or delete tags, and never edit a version number to cut
+  a release: auto-release tags from the commit types (`feat` minor; `fix`,
+  `perf`, `revert` patch; `!` or a `BREAKING CHANGE:` footer major).
+- Write Conventional Commit subjects; they decide the next version.
+- `version` in `pyproject.toml` is a placeholder and stays `0.0.0`; the
+  image's `org.opencontainers.image.version` label comes from the tag.
 
 ## Template
 
