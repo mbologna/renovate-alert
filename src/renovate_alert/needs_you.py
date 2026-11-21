@@ -36,6 +36,8 @@ import urllib.request
 
 from apprise_notify import notify
 
+from renovate_alert import report
+
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_OWNER = os.environ.get("GITHUB_OWNER", "")
 GITHUB_API = "https://api.github.com"
@@ -634,7 +636,7 @@ def run():
             why = " (version hold reminder)"
         title = f"Renovate: {len(listed)} {what} need you{why}"
         body = render(listed, new) + "".join(f"\n\n{error}" for error in errors)
-        delivered = notify(APPRISE_URL, title, body, "info")
+        delivered = report.send(notify, APPRISE_URL, title, body, "info")
         if delivered:
             sent, state["last_sent"] = current, today
         if holds_today:

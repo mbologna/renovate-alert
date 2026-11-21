@@ -48,6 +48,16 @@ digest, grouped by forge and repository with each one's reason and age;
 `NEEDS_YOU=only` sends it alone. It goes out when something new appears, and as
 a Monday reminder while the list isn't empty.
 
+## One report
+
+`REPORT=on` folds the digest and the needs-you message into one report a
+day, together with what [Gatus](https://github.com/TwiN/gatus) saw since the
+last one: checks failing now, checks that failed and recovered, and how long
+each heartbeat job took. What went bad goes to `APPRISE_URL` as a warning;
+what went well goes silently to `REPORT_GOOD_URL`. Failures inside
+`QUIET_WINDOWS`, such as a nightly reboot slot, count as expected. See
+[docs/report.md](docs/report.md).
+
 ## Run it
 
 Renovate writes run logs only when `LOG_FILE` is set: give each run its own
@@ -132,6 +142,15 @@ Every variable the code reads:
 | `HOLDS_FORGE` | `forgejo` | Forge of `HOLDS_REPO`: `forgejo`, `github` or `gitlab` |
 | `HOLDS_REPO` | | `owner/repo` holding the Renovate config; required with `VERSION_HOLDS` |
 | `HOLDS_FILE` | `renovate.json` | Path of the config (JSON) in `HOLDS_REPO` |
+| **One report** | | |
+| `REPORT` | `off` | `on`: send one report instead of the digest and the needs-you message |
+| `GATUS_URLS` | | `name=url` pairs, comma-separated: the Gatus instances to read |
+| `REPORT_GOOD_URL` | `APPRISE_URL` | Where the good report goes, with Apprise's tag `info` (silent) |
+| `QUIET_WINDOWS` | | Local `HH:MM-HH:MM` windows, comma-separated, in which a failure that recovered is expected |
+| `REPORT_TZ` | `UTC` | Time zone of `QUIET_WINDOWS` and of the times in the report |
+| `REPORT_FIRST_HOURS` | `24` | Hours the first report looks back |
+| `REPORT_PAGE_SIZE` | `300` | Results per Gatus check read: enough for a day of 5-minute checks |
+| `REPORT_STATE_FILE` | `report-state.json` | State file of the report (the last one's time), in `STATE_DIR` |
 
 ## Development
 
