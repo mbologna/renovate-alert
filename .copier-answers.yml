@@ -29,5 +29,3 @@ sample_code: false
 script_target: renovate_alert:main
 smoke_cmd: APPRISE_URL= python -c 'import renovate_alert'
 writable_dirs: ''
-
-#copier updated
