@@ -22,6 +22,9 @@ NEEDS_YOU=on adds the Renovate PRs that need a person, on GitHub, GitLab and
 Forgejo, as a message of their own (needs_you.py); NEEDS_YOU=only runs that
 check alone. Optional checks add GitLab CI minutes and storage, token expiry,
 disabled GitHub workflows and a Renovate config's version holds to it.
+
+REPORT=on folds both messages, with what Gatus saw overnight, into one report:
+what went bad as an alert, what went well silently (report.py).
 """
 
 import datetime as dt
@@ -38,7 +41,7 @@ import urllib.request
 
 from apprise_notify import notify
 
-from renovate_alert import gcs, needs_you
+from renovate_alert import gcs, needs_you, report
 
 # FORGE_API is the Forgejo/Gitea API base, e.g. https://codeberg.org/api/v1
 # (CODEBERG_API, its first name, still works). Unset: run logs only, no
@@ -78,11 +81,12 @@ if NEEDS_YOU not in ("off", "on", "only"):
 
 # Days before something counts as stuck. Pending legitimately lasts as long as
 # the longest minimumReleaseAge (30 days); rate-limited items drain at about
-# 24 merges a week; automerge PRs wait at most for the next Tue/Wed/Thu window.
+# 24 merges a week; automerge PRs wait at most for the next merge window, a few
+# days at most even over a weekend.
 PENDING_DAYS = int(os.environ.get("PENDING_DAYS", "35"))
 RATE_LIMITED_DAYS = int(os.environ.get("RATE_LIMITED_DAYS", "10"))
 OPEN_AUTOMERGE_DAYS = int(os.environ.get("OPEN_AUTOMERGE_DAYS", "8"))
-# Runs every day, the longest gap between scheduled runs is 11h45m.
+# Runs every day: a day without one, with some slack, means Renovate stopped.
 RUN_STALE_HOURS = int(os.environ.get("RUN_STALE_HOURS", "26"))
 # Days since its release before a pending update counts as overdue: no age
 # gate (minimumReleaseAge) lasts this long, so something else holds it.
@@ -394,10 +398,18 @@ def days(since):
 
 def main():
     failures = []
+    # With REPORT=on the checks below hand their messages to the report
+    # instead of sending them, and record them as sent; if the report then
+    # isn't delivered, their state goes back, so the next run reports them.
+    saved = report.snapshot([STATE, needs_you.STATE]) if report.ENABLED else {}
     if NEEDS_YOU != "only":
         failures += check_renovate()
     if NEEDS_YOU != "off":
         failures += needs_you.run()
+    if report.ENABLED:
+        failures += report.run()
+        if not report.delivered:
+            report.restore(saved)
     if failures:
         sys.exit("\n".join(failures))
 
@@ -504,7 +516,8 @@ def check_renovate():
     if new:
         lines = [f"- {v}" for v in new.values()]
         link = f"\n\nDashboard: {WEB_URL}/{REPO}/issues/{DASHBOARD}" if API else ""
-        sent = notify(APPRISE_URL, f"Renovate ({NAME}): {len(new)} new problem(s)", "\n".join(lines) + link, "warning")
+        title = f"Renovate ({NAME}): {len(new)} new problem(s)"
+        sent = report.send(notify, APPRISE_URL, title, "\n".join(lines) + link, "warning")
     print(f"{len(problems)} problem(s), {len(new)} new", *problems.values(), sep="\n")
     # Undelivered problems stay unalerted, so the next run tries again.
     delivered = set(problems) if sent else set(problems) & alerted
