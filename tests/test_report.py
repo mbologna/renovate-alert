@@ -135,6 +135,13 @@ def test_failures_sort_into_bad_and_expected(monkeypatch, sent):
             "results": [ok("05:30")],
             "events": [event("UNHEALTHY", "05:22"), event("HEALTHY", "05:27")],
         },
+        # Down 01:00-01:05: a blip, counted, not listed.
+        {
+            "name": "Navidrome",
+            "group": "public",
+            "results": [ok("05:30")],
+            "events": [event("UNHEALTHY", "01:00"), event("HEALTHY", "01:05")],
+        },
         # Down at 02:10 for 25 min: bad.
         {
             "name": "Radarr",
@@ -178,7 +185,9 @@ def test_failures_sort_into_bad_and_expected(monkeypatch, sent):
     good_title, good_body = sent["good"][0]
     assert good_title.startswith("Night report: the rest went well (since Mon 05:50")
     assert "public/Jellyfin (yankee): failed 05:22-05:27 (5 min)" in good_body
-    assert "Checks healthy now: 3/5 on yankee." in good_body
+    assert "Checks healthy now: 4/6 on yankee." in good_body
+    assert "Brief blips (recovered within 10 min): 1." in good_body
+    assert "Navidrome" not in body
 
 
 def test_failing_since_falls_back_on_the_last_success(monkeypatch, sent):
@@ -276,13 +285,21 @@ def test_post_silent_reports_failure(monkeypatch):
     assert not rpt.post_silent("http://a.example/notify/a", "T", "B")
 
 
-def test_gatus_reads_the_statuses(monkeypatch):
+def test_gatus_reads_each_checks_events(monkeypatch):
     seen = []
+    answers = {
+        "statuses": b'[{"name": "A (x)", "key": "g_a-(x)", "results": [{"success": true}]}]',
+        "g_a-%28x%29": b'{"name": "A (x)", "key": "g_a-(x)", "results": [], "events": [{"type": "START"}]}',
+    }
 
     def urlopen(request, timeout):
         seen.append(request.full_url)
-        return Reply(b'[{"name": "A"}]')
+        return Reply(answers[request.full_url.split("/api/v1/endpoints/")[1].split("/")[0].split("?")[0]])
 
     monkeypatch.setattr(rpt.urllib.request, "urlopen", urlopen)
-    assert rpt.gatus("http://gatus.example/") == [{"name": "A"}]
-    assert seen == [f"http://gatus.example/api/v1/endpoints/statuses?page=1&pageSize={rpt.PAGE_SIZE}"]
+    statuses = rpt.gatus("http://gatus.example/")
+    assert statuses == [{"name": "A (x)", "key": "g_a-(x)", "results": [], "events": [{"type": "START"}]}]
+    assert seen == [
+        f"http://gatus.example/api/v1/endpoints/statuses?page=1&pageSize={rpt.PAGE_SIZE}",
+        f"http://gatus.example/api/v1/endpoints/g_a-%28x%29/statuses?page=1&pageSize={rpt.PAGE_SIZE}",
+    ]
