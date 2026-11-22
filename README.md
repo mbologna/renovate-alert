@@ -149,7 +149,8 @@ Every variable the code reads:
 | `QUIET_WINDOWS` | | Local `HH:MM-HH:MM` windows, comma-separated, in which a failure that recovered is expected |
 | `REPORT_TZ` | `UTC` | Time zone of `QUIET_WINDOWS` and of the times in the report |
 | `REPORT_FIRST_HOURS` | `24` | Hours the first report looks back |
-| `REPORT_PAGE_SIZE` | `300` | Results per Gatus check read: enough for a day of 5-minute checks |
+| `REPORT_MIN_DOWN_MINUTES` | `10` | A failure that recovered sooner is a blip, counted in the good report, not listed in the bad one |
+| `REPORT_PAGE_SIZE` | `100` | Results per Gatus check read (Gatus keeps 100 by default); failures come from its events, which reach further back |
 | `REPORT_STATE_FILE` | `report-state.json` | State file of the report (the last one's time), in `STATE_DIR` |
 
 ## Development

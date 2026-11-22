@@ -25,6 +25,7 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import zoneinfo
 
@@ -46,8 +47,10 @@ TZ = zoneinfo.ZoneInfo(os.environ.get("REPORT_TZ", "UTC"))
 FIRST_HOURS = int(os.environ.get("REPORT_FIRST_HOURS", "24"))
 STATE_DIR = os.environ.get("STATE_DIR") or os.environ.get("LOG_DIR", "/logs")
 STATE = os.path.join(STATE_DIR, os.environ.get("REPORT_STATE_FILE", "report-state.json"))
-# Results per Gatus check: enough to cover a day of 5-minute checks.
-PAGE_SIZE = int(os.environ.get("REPORT_PAGE_SIZE", "300"))
+# Results per Gatus check. Gatus keeps 100 by default (storage
+# maximum-number-of-results), about 8 hours of 5-minute checks; the events it
+# keeps (50) reach further back and are what failures are read from.
+PAGE_SIZE = int(os.environ.get("REPORT_PAGE_SIZE", "100"))
 
 
 def windows(spec):
@@ -61,6 +64,10 @@ def windows(spec):
 
 
 QUIET_WINDOWS = windows(os.environ.get("QUIET_WINDOWS", ""))
+# A failure that recovered sooner than this is a blip: one failed check every
+# so often is normal, and Gatus's own alert waits for several in a row. Blips
+# are counted in the good report instead of listed in the bad one.
+MIN_DOWN_MINUTES = int(os.environ.get("REPORT_MIN_DOWN_MINUTES", "10"))
 NOW = dt.datetime.now(dt.UTC)
 
 # What the other checks would have sent, collected instead while REPORT is on.
@@ -127,14 +134,23 @@ def span(seconds):
     return f"{minutes} min" if minutes < 120 else f"{minutes / 60:.1f} h"
 
 
-def gatus(url):
-    """Every check's status from one Gatus: results and events."""
-    request = urllib.request.Request(
-        f"{url.rstrip('/')}/api/v1/endpoints/statuses?page=1&pageSize={PAGE_SIZE}",
-        headers={"Accept": "application/json"},
-    )
+def get_json(url):
+    request = urllib.request.Request(url, headers={"Accept": "application/json"})
     with urllib.request.urlopen(request, timeout=30) as response:  # nosec B310: GATUS_URLS, set by the operator
         return json.load(response)
+
+
+def gatus(url):
+    """Every check's status from one Gatus, with its results and events.
+
+    The list of statuses carries no events, so each check's own status, which
+    does, is read too."""
+    base = url.rstrip("/")
+    statuses = get_json(f"{base}/api/v1/endpoints/statuses?page=1&pageSize={PAGE_SIZE}")
+    for status in statuses:
+        key = urllib.parse.quote(status["key"], safe="")
+        status.update(get_json(f"{base}/api/v1/endpoints/{key}/statuses?page=1&pageSize={PAGE_SIZE}"))
+    return statuses
 
 
 def why(result):
@@ -169,7 +185,12 @@ def look(name, statuses, since, bad, good):
             elif event["type"] == "HEALTHY" and down is not None:
                 if when > since:
                     line = f"{label} ({name}): failed {hm(down)}-{hm(when)} ({span((when - down).total_seconds())})"
-                    (good["expected"] if quiet(down, when) else bad).append(line)
+                    if quiet(down, when):
+                        good["expected"].append(line)
+                    elif when - down < dt.timedelta(minutes=MIN_DOWN_MINUTES):
+                        good["blips"] += 1
+                    else:
+                        bad.append(line)
                 down = None
         if status.get("group") == "heartbeats":
             for result in results:
@@ -211,7 +232,7 @@ def run():
     except FileNotFoundError, json.JSONDecodeError:
         state = {}
     since = parse_time(state["last_report"]) if "last_report" in state else NOW - dt.timedelta(hours=FIRST_HOURS)
-    bad, good = [], {"expected": [], "durations": {}}
+    bad, good = [], {"expected": [], "durations": {}, "blips": 0}
     seen = []
     for name, url in GATUS_URLS:
         try:
@@ -230,6 +251,8 @@ def run():
     lines = [f"Checks healthy now: {', '.join(seen) or 'no Gatus read'}."]
     if good["durations"]:
         lines.append("Took: " + ", ".join(f"{k} {v}" for k, v in sorted(good["durations"].items())) + ".")
+    if good["blips"]:
+        lines.append(f"Brief blips (recovered within {MIN_DOWN_MINUTES} min): {good['blips']}.")
     if good["expected"]:
         lines.append("Expected (inside the quiet windows):\n" + "\n".join(f"- {line}" for line in good["expected"]))
     good_title = "Night report: all good" if not bad else f"Night report: the rest went well ({period})"

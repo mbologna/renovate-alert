@@ -8,9 +8,12 @@ you read one message about the night instead of one per problem.
 
 ## What it reads
 
-- **Gatus**, for each `name=url` in `GATUS_URLS`: every check's status from
-  `GET /api/v1/endpoints/statuses?page=1&pageSize=REPORT_PAGE_SIZE`, external
-  endpoints (heartbeats) included. No token: Gatus serves this read-only API
+- **Gatus**, for each `name=url` in `GATUS_URLS`: the list of checks from
+  `GET /api/v1/endpoints/statuses`, external endpoints (heartbeats) included,
+  then each check's own `GET /api/v1/endpoints/<key>/statuses`, the only one
+  that carries its events (healthy/unhealthy transitions, the last 50 kept),
+  which is where failures and recoveries are read from. Results are capped at
+  what Gatus keeps (100 a check by default). No token: Gatus serves this read-only API
   to anyone who can reach it, so keep it on a private network.
 - **The Renovate checks** this run makes anyway (the run logs, the dashboard,
   the needs-you list), unchanged: each still keeps its own state, so a problem
@@ -24,7 +27,8 @@ you read one message about the night instead of one per problem.
   conditions it failed);
 - a check that failed and recovered since the last report, with how long it
   was down, unless both ends fall inside one of `QUIET_WINDOWS` on the same
-  day (a reboot slot, when checks fail on purpose);
+  day (a reboot slot, when checks fail on purpose), or it was back within
+  `REPORT_MIN_DOWN_MINUTES` (a blip: counted in the good report);
 - a Gatus that could not be read;
 - the Renovate problems and the needs-you list, if this run has any.
 
