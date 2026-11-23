@@ -24,6 +24,9 @@ From the run logs (rules and matched log lines in [docs/checks.md](docs/checks.m
 - A limit (`branchConcurrentLimit`, `prHourlyLimit`...) kept new branches from being created.
 - A release has no release date, so `minimumReleaseAge` holds it pending for good.
 - An update is still pending more than `OVERDUE_DAYS` after its release.
+- Renovate offers no update, yet the newest release is `STUCK_DAYS` newer than
+  the pin, or the pin is missing from the releases: versions that no longer
+  sort by date, such as after a linuxserver `-ls` counter reset.
 
 From the Forgejo/Gitea API, with `FORGE_API` set:
 
@@ -102,6 +105,7 @@ Every variable the code reads:
 | `STATE_FILE` | `alert-state.json` | State file of the run log and forge checks; one per check sharing `STATE_DIR` |
 | `RUN_STALE_HOURS` | `26` | Hours without a new run log before Renovate counts as not running; first check's look-back |
 | `OVERDUE_DAYS` | `95` | Days after its release that a still-pending update is reported |
+| `STUCK_DAYS` | `14` | Days the newest release may be newer than a pin with no update; `0`: off |
 | `NEEDS_YOU` | `off` | `on`: also list the PRs that need you; `only`: list them alone |
 | **Forgejo/Gitea dashboard and PRs** | | |
 | `FORGE_API` | | API base, e.g. `https://forgejo.example.org/api/v1`; unset: run logs only |
