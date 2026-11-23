@@ -52,6 +52,7 @@ def setup(monkeypatch, tmp_path):
     monkeypatch.setattr(rpt, "GOOD_URL", "http://apprise.example/notify/alerts")
     monkeypatch.setattr(rpt, "outbox", [])
     monkeypatch.setattr(rpt, "delivered", True)
+    monkeypatch.setattr(rpt, "SINCE", None)
 
 
 @pytest.fixture
@@ -188,6 +189,52 @@ def test_failures_sort_into_bad_and_expected(monkeypatch, sent):
     assert "Checks healthy now: 4/6 on yankee." in good_body
     assert "Brief blips (recovered within 10 min): 1." in good_body
     assert "Navidrome" not in body
+
+
+def test_clock_parse():
+    assert rpt.clock("03:00") == (3, 0)
+    assert rpt.clock(" ") is None
+    for bad in ("3", "24:00", "03:60", "x:y"):
+        with pytest.raises(ValueError):
+            rpt.clock(bad)
+
+
+def test_report_since_caps_the_period(monkeypatch):
+    monkeypatch.setattr(rpt, "SINCE", (3, 0))
+    # The last report was yesterday morning, or there was none: the night only.
+    assert rpt.period_start({"last_report": at("05:50", day=23)}) == rpt.parse_time(at("03:00"))
+    assert rpt.period_start({}) == rpt.parse_time(at("03:00"))
+    # A report since 03:00 already: from that one.
+    assert rpt.period_start({"last_report": at("04:00")}) == rpt.parse_time(at("04:00"))
+    # Before 03:00, the cap is yesterday's 03:00.
+    monkeypatch.setattr(rpt, "NOW", rpt.parse_time(at("02:00")))
+    assert rpt.period_start({"last_report": at("05:50", day=22)}) == rpt.parse_time(at("03:00", day=23))
+
+
+def test_report_since_leaves_the_day_out(monkeypatch, sent):
+    monkeypatch.setattr(rpt, "SINCE", (3, 0))
+    statuses = [
+        {
+            "name": "Sonarr",
+            "group": "yankee",
+            "results": [ok("05:45")],
+            "events": [event("UNHEALTHY", "17:41", day=23), event("HEALTHY", "19:02", day=23)],
+        },
+        {
+            "name": "Kavita",
+            "group": "yankee",
+            "results": [ok("05:45")],
+            "events": [event("UNHEALTHY", "03:30"), event("HEALTHY", "04:00")],
+        },
+    ]
+    serve(monkeypatch, {"yankee": statuses})
+    with open(rpt.STATE, "w") as f:
+        json.dump({"last_report": at("05:50", day=23)}, f)
+    rpt.run()
+    title, body, _ = sent["bad"][0]
+    assert title == "Night report: 1 thing(s) went bad"
+    assert "Kavita" in body and "Sonarr" not in body
+    assert "(since Tue 03:00)" in sent["good"][0][0]
 
 
 def test_failing_since_falls_back_on_the_last_success(monkeypatch, sent):
