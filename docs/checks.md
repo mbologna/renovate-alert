@@ -177,13 +177,13 @@ of dashboard items (`first_seen`), the problems reported (`alerted`), how far
 the logs have been read (`logs_read_until`) and whether the newest run failed
 (`last_run_failed`). It is written to a temporary file and renamed.
 
-`APPRISE_URL` holds one Apprise API URL or several separated by spaces
-([apprise-notify](https://github.com/mbologna/apprise-notify-py) 1.2.0). They
-are tried in order and the first that delivers ends the attempt, so the others
-are not called. A network error or HTTP 5xx
-is retried once after a second; HTTP 4xx, or 204 (no configuration for the
-key), moves on at once. An empty `APPRISE_URL` delivers nothing; an unset one
-stops the program at start.
+`APPRISE_URL` holds one Apprise API URL or several separated by spaces, sent
+through the [apprise](https://github.com/caronc/apprise) library. Each URL is
+its own priority group: they are tried in order and the first that delivers
+ends the attempt, so the others are not called. A URL that fails (a network
+error, any status but 200, including 204 when the key has no configuration) is
+retried once after a second before the next is tried. An empty `APPRISE_URL`
+delivers nothing; an unset one stops the program at start.
 
 A digest that no URL delivers is retried on the next run: its problems stay
 unreported and its logs unread. The run then exits non-zero with `Apprise did

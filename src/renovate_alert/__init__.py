@@ -39,9 +39,8 @@ import time
 import urllib.error
 import urllib.request
 
-from apprise_notify import notify
-
 from renovate_alert import gcs, needs_you, report
+from renovate_alert.report import notify
 
 # FORGE_API is the Forgejo/Gitea API base, e.g. https://codeberg.org/api/v1
 # (CODEBERG_API, its first name, still works). Unset: run logs only, no
