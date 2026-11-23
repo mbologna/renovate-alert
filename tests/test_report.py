@@ -3,6 +3,7 @@ import http.server
 import io
 import json
 import threading
+import time
 import urllib.error
 import zoneinfo
 
@@ -315,22 +316,25 @@ class Reply(io.BytesIO):
 
 
 class StubApprise:
-    """A local Apprise API stand-in answering every POST with one status; records the requests."""
+    """A local Apprise API stand-in answering every POST with one status (after
+    `delay` seconds); records the requests."""
 
-    def __init__(self, status):
+    def __init__(self, status, delay=0.0):
         calls = self.calls = []
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
                 length = int(self.headers.get("content-length", 0))
                 calls.append((self.path, self.headers.get("content-type"), json.loads(self.rfile.read(length))))
+                time.sleep(delay)
                 self.send_response(status)
                 self.end_headers()
 
             def log_message(self, *args):
                 pass
 
-        self.server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.url = f"http://127.0.0.1:{self.server.server_port}/notify/alerts"
 
@@ -344,8 +348,8 @@ def stub(monkeypatch):
     monkeypatch.setattr(rpt, "APPRISE_RETRY_WAIT_SECONDS", 0)
     servers = []
 
-    def start(status):
-        servers.append(StubApprise(status))
+    def start(status, delay=0.0):
+        servers.append(StubApprise(status, delay))
         return servers[-1]
 
     yield start
@@ -382,6 +386,13 @@ def test_notify_without_a_url_returns_false():
     assert not rpt.notify("", "T", "B")
 
 
+def test_notify_a_reply_slower_than_the_timeout_is_not_delivered(stub, monkeypatch):
+    real = rpt.apprise_api_url
+    monkeypatch.setattr(rpt, "apprise_api_url", lambda url: real(url, timeout=0.2))
+    slow = stub(200, delay=1.0)
+    assert not rpt.notify(slow.url, "T", "B")
+
+
 def test_the_modules_send_through_the_one_notify():
     assert ra.notify is rpt.notify and ny.notify is rpt.notify
 
@@ -389,11 +400,11 @@ def test_the_modules_send_through_the_one_notify():
 def test_apprise_api_url():
     assert (
         rpt.apprise_api_url("http://apprise:8000/notify/alerts", timeout=15)
-        == "apprise://apprise:8000/alerts?method=json&version=1&retry=1&wait=1&rto=15"
+        == "apprise://apprise:8000/alerts?method=json&version=1&retry=1&wait=1&cto=15&rto=15"
     )
     assert (
         rpt.apprise_api_url("https://example.org/apprise/notify/k?x=y", timeout=5)
-        == "apprises://example.org/apprise/k?method=json&version=1&retry=1&wait=1&rto=5"
+        == "apprises://example.org/apprise/k?method=json&version=1&retry=1&wait=1&cto=5&rto=5"
     )
 
 
