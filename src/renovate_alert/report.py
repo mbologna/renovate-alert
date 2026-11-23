@@ -18,6 +18,8 @@ bad. The good report always goes, to REPORT_GOOD_URL (default APPRISE_URL)
 with Apprise's tag `info`, which selects a silent notification in the configs
 this was written for. The time of the last delivered report is kept in
 STATE_DIR/report-state.json; a first run looks back REPORT_FIRST_HOURS.
+REPORT_SINCE (a local HH:MM) caps how far back any run looks, so a morning
+report covers the night and not the day before, already alerted on live.
 """
 
 import datetime as dt
@@ -45,6 +47,22 @@ APPRISE_URL = os.environ.get("APPRISE_URL", "")
 GOOD_URL = os.environ.get("REPORT_GOOD_URL") or APPRISE_URL
 TZ = zoneinfo.ZoneInfo(os.environ.get("REPORT_TZ", "UTC"))
 FIRST_HOURS = int(os.environ.get("REPORT_FIRST_HOURS", "24"))
+
+
+def clock(spec):
+    """'03:00' -> (3, 0); '' -> None."""
+    if not spec.strip():
+        return None
+    h, m = (int(x) for x in spec.strip().split(":"))
+    if not (0 <= h < 24 and 0 <= m < 60):
+        raise ValueError(spec)
+    return h, m
+
+
+try:
+    SINCE = clock(os.environ.get("REPORT_SINCE", ""))
+except ValueError:
+    sys.exit("REPORT_SINCE is a local time, HH:MM.")
 STATE_DIR = os.environ.get("STATE_DIR") or os.environ.get("LOG_DIR", "/logs")
 STATE = os.path.join(STATE_DIR, os.environ.get("REPORT_STATE_FILE", "report-state.json"))
 # Results per Gatus check. Gatus keeps 100 by default (storage
@@ -223,6 +241,19 @@ def post_silent(urls, title, body):
     return False
 
 
+def period_start(state):
+    """The last report's time (or REPORT_FIRST_HOURS ago), but no earlier than
+    the last time the local clock read REPORT_SINCE."""
+    since = parse_time(state["last_report"]) if "last_report" in state else NOW - dt.timedelta(hours=FIRST_HOURS)
+    if SINCE:
+        now = local(NOW)
+        floor = now.replace(hour=SINCE[0], minute=SINCE[1], second=0, microsecond=0)
+        if floor > now:
+            floor -= dt.timedelta(days=1)
+        since = max(since, floor)
+    return since
+
+
 def run():
     """Build and send the report; return what failed, for the exit status."""
     global delivered
@@ -231,7 +262,7 @@ def run():
             state = json.load(f)
     except FileNotFoundError, json.JSONDecodeError:
         state = {}
-    since = parse_time(state["last_report"]) if "last_report" in state else NOW - dt.timedelta(hours=FIRST_HOURS)
+    since = period_start(state)
     bad, good = [], {"expected": [], "durations": {}, "blips": 0}
     seen = []
     for name, url in GATUS_URLS:

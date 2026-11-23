@@ -44,10 +44,15 @@ target with an `info`-tagged silent copy:
 ## State
 
 `STATE_DIR/report-state.json` holds the time of the last report that was
-delivered. A first run looks back `REPORT_FIRST_HOURS`. If the bad report is
+delivered. A first run looks back `REPORT_FIRST_HOURS`. `REPORT_SINCE`, a local
+`HH:MM`, caps both: the report never looks back past the last time the clock
+read it. With `REPORT_SINCE=03:00`, a 05:50 report covers 03:00-05:50, and
+what failed the afternoon before, which Gatus alerted on at the time, stays
+out. Checks still failing are listed whenever they went down. If the bad report is
 not delivered, nothing moves on: the report's period stays where it was, and
 the Renovate checks' state files go back to what they were before the run, so
-the next run reports the same problems again. The job then exits non-zero.
+the next run reports the same problems again. The job then exits non-zero. With
+`REPORT_SINCE`, the period carried over stops at that time.
 
 ## Example
 
@@ -55,7 +60,7 @@ the next run reports the same problems again. The job then exits non-zero.
 docker run --rm \
   -e REPORT=on \
   -e GATUS_URLS=home=http://gatus.home:8080,cloud=http://gatus.cloud:8080 \
-  -e QUIET_WINDOWS=05:15-05:55 -e REPORT_TZ=Europe/Rome \
+  -e QUIET_WINDOWS=05:15-05:55 -e REPORT_SINCE=03:00 -e REPORT_TZ=Europe/Rome \
   -e APPRISE_URL=http://apprise:8000/notify/alerts \
   -e REPORT_GOOD_URL=http://apprise:8000/notify/reports \
   -e FORGE_API=https://forgejo.example.org/api/v1 -e REPOSITORY=owner/repo \
