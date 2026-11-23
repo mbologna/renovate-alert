@@ -1,6 +1,8 @@
 import datetime as dt
+import http.server
 import io
 import json
+import threading
 import urllib.error
 import zoneinfo
 
@@ -310,6 +312,89 @@ class Reply(io.BytesIO):
 
     def __exit__(self, *a):
         return False
+
+
+class StubApprise:
+    """A local Apprise API stand-in answering every POST with one status; records the requests."""
+
+    def __init__(self, status):
+        calls = self.calls = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("content-length", 0))
+                calls.append((self.path, self.headers.get("content-type"), json.loads(self.rfile.read(length))))
+                self.send_response(status)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_port}/notify/alerts"
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@pytest.fixture
+def stub(monkeypatch):
+    monkeypatch.setattr(rpt, "APPRISE_RETRY_WAIT_SECONDS", 0)
+    servers = []
+
+    def start(status):
+        servers.append(StubApprise(status))
+        return servers[-1]
+
+    yield start
+    for server in servers:
+        server.close()
+
+
+def test_notify_posts_plain_json_to_the_key(stub):
+    """No format: Apprise API passes the body on as plain text."""
+    ok = stub(200)
+    assert rpt.notify(ok.url, "T", "B", "warning")
+    assert ok.calls == [("/notify/alerts", "application/json", {"title": "T", "body": "B", "type": "warning"})]
+
+
+def test_notify_retries_a_failing_url_once_then_the_next_delivers(stub):
+    down, ok, third = stub(500), stub(200), stub(200)
+    assert rpt.notify(f"{down.url} {ok.url} {third.url}", "T", "B")
+    assert (len(down.calls), len(ok.calls), len(third.calls)) == (2, 1, 0)
+
+
+def test_notify_counts_no_configuration_204_as_not_delivered(stub):
+    empty, ok = stub(204), stub(200)
+    assert rpt.notify(f"{empty.url} {ok.url}", "T", "B")
+    assert len(ok.calls) == 1
+
+
+def test_notify_every_url_failing_returns_false(stub):
+    a, b = stub(500), stub(500)
+    assert not rpt.notify(f"{a.url} {b.url}", "T", "B")
+    assert (len(a.calls), len(b.calls)) == (2, 2)
+
+
+def test_notify_without_a_url_returns_false():
+    assert not rpt.notify("", "T", "B")
+
+
+def test_the_modules_send_through_the_one_notify():
+    assert ra.notify is rpt.notify and ny.notify is rpt.notify
+
+
+def test_apprise_api_url():
+    assert (
+        rpt.apprise_api_url("http://apprise:8000/notify/alerts", timeout=15)
+        == "apprise://apprise:8000/alerts?method=json&version=1&retry=1&wait=1&rto=15"
+    )
+    assert (
+        rpt.apprise_api_url("https://example.org/apprise/notify/k?x=y", timeout=5)
+        == "apprises://example.org/apprise/k?method=json&version=1&retry=1&wait=1&rto=5"
+    )
 
 
 def test_post_silent_sends_the_info_tag_and_fails_over(monkeypatch):

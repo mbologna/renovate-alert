@@ -178,8 +178,8 @@ workflow, then builds, smoke-tests and scans the image with its `docker-ci`
 workflow.
 
 Dependencies resolve only to releases at least 7 days old (`exclude-newer`, uv
-0.12.12 or later), except `apprise-notify`; a newer CVE fix needs a temporary
-`exclude-newer-package` entry, then `uv lock`. Pull requests merge with a merge
+0.12.12 or later); a newer CVE fix needs a temporary `exclude-newer-package`
+entry, then `uv lock`. Pull requests merge with a merge
 commit, and every commit subject must follow
 [Conventional Commits](https://www.conventionalcommits.org/); they decide the
 next release ([Versioning](#versioning)).

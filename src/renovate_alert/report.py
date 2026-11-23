@@ -31,7 +31,7 @@ import urllib.parse
 import urllib.request
 import zoneinfo
 
-from apprise_notify import notify
+import apprise
 
 _REPORT = os.environ.get("REPORT", "off").lower()
 if _REPORT not in ("on", "off"):
@@ -47,6 +47,38 @@ APPRISE_URL = os.environ.get("APPRISE_URL", "")
 GOOD_URL = os.environ.get("REPORT_GOOD_URL") or APPRISE_URL
 TZ = zoneinfo.ZoneInfo(os.environ.get("REPORT_TZ", "UTC"))
 FIRST_HOURS = int(os.environ.get("REPORT_FIRST_HOURS", "24"))
+# Seconds an Apprise API request may take.
+APPRISE_TIMEOUT_SECONDS = 15
+# Seconds before the one retry of an Apprise URL.
+APPRISE_RETRY_WAIT_SECONDS = 1
+
+
+def apprise_api_url(url, timeout=APPRISE_TIMEOUT_SECONDS):
+    """The apprise library's URL for an Apprise API endpoint, http(s)://host:port/notify/<key>.
+
+    JSON to /notify/<key> (version=1), as Apprise API expects, with one retry
+    and the given read timeout. Any query on the URL is dropped."""
+    parsed = urllib.parse.urlsplit(url)
+    scheme = "apprises" if parsed.scheme == "https" else "apprise"
+    prefix, _, key = parsed.path.rpartition("/notify/")
+    path = f"{prefix.strip('/')}/{key}".lstrip("/")
+    return f"{scheme}://{parsed.netloc}/{path}?method=json&version=1&retry=1&wait={APPRISE_RETRY_WAIT_SECONDS}&rto={timeout}"
+
+
+def notify(urls, title, body, type_="info"):
+    """Send one notification and return whether it was delivered.
+
+    urls holds one Apprise API URL or several separated by whitespace. Each is
+    its own apprise priority group, so they are tried in order: the first that
+    delivers wins, and each is retried once before the next. No URL returns
+    False. The body goes out without a format, as plain text. apprise logs
+    failures; it never raises."""
+    notifier = apprise.Apprise()
+    for priority, url in enumerate(urls.split(), start=1):
+        notifier.add(apprise_api_url(url), tag=f"{priority}:alert")
+    if not len(notifier):
+        return False
+    return bool(notifier.notify(title=title, body=body, notify_type=type_, tag="alert"))
 
 
 def clock(spec):

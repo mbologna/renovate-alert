@@ -34,9 +34,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from apprise_notify import notify
-
 from renovate_alert import report
+from renovate_alert.report import notify
 
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_OWNER = os.environ.get("GITHUB_OWNER", "")
