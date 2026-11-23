@@ -188,6 +188,21 @@ The project skeleton comes from the [Copier](https://copier.readthedocs.io/)
 template [python-app-template](https://github.com/mbologna/python-app-template);
 see [AGENTS.md](AGENTS.md) for the conventions.
 
+## Why not an existing tool
+
+- Renovate's `exitCodeForErrors` (experimental) gives a failed run an exit
+  code, but sends no alert. Nothing reads a self-hosted run's logs for missed
+  runs, branch limits, releases without a date or overdue updates.
+- Renovate's Dependency Dashboard on Forgejo or Gitea lists Repository
+  Problems, but nothing sends a notification when one appears.
+- GitHub's and GitLab's own emails warn about token expiry and CI minutes only
+  at fixed thresholds, and not through Apprise.
+- [Gatus](https://github.com/TwiN/gatus) alerts on each check as it fails. No
+  tool builds a daily report from its history, or one "needs you" list across
+  GitHub, GitLab and Forgejo.
+
+Checked 2026-11-23.
+
 ## Versioning
 
 Releases follow SemVer: [auto-release](https://github.com/mbologna/auto-release)
