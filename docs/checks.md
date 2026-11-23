@@ -131,6 +131,31 @@ being `newVersion`, `newValue` or `newDigest`. No age gate lasts that long, so
 something else holds it. In a pretty log the record's indented detail lines
 are joined into JSON; a record that doesn't parse is skipped.
 
+## Stuck pins
+
+The same record gives each dependency's `mostRecentTimestamp`, which Renovate
+sets only when the highest version is also the newest release, and
+`currentVersionTimestamp`, the pin's release date. A dependency with no
+updates, no `skipReason` and a `mostRecentTimestamp` is reported when that
+date is `STUCK_DAYS` (default 14) or more after `currentVersionTimestamp`, or
+when the pin has no date because it isn't among the releases. Its newest
+release then ranks at or below the pin, so the versions no longer sort by date,
+or a rule holds the update back. One case is a linuxserver image whose `-ls`
+counter was reset, when the image's datasource keeps only the new builds: they
+all rank below the pin, so Renovate never offers one, and nothing else reports
+it. When a lower version is newer than the highest, Renovate leaves
+`mostRecentTimestamp` out and nothing is reported. A reset whose old builds
+stay in the releases therefore goes unseen, as does a maintenance line
+releasing below a newer major. Each repository's newest run decides, so a run
+that no longer finds a pin clears it.
+
+With `HOLDS_REPO` set (see [upkeep.md](upkeep.md)), the config file the version
+holds come from is read when one of that repository's dependencies is
+reported. A dependency named by a rule with `allowedVersions` is left out:
+`matchDepNames` and `matchPackageNames` entries are compared with both its
+`depName` and its `packageName`, exactly, as a `/regex/` or as a glob, and
+negated entries are ignored. If the file can't be read, nothing is left out.
+
 ## Forgejo/Gitea checks
 
 With `FORGE_API` set the check also reads, with `RENOVATE_TOKEN`,

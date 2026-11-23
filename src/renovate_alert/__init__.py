@@ -10,7 +10,8 @@ and every Renovate run log (written with Renovate's LOG_FILE) since the last
 check, from LOG_DIR or, with LOG_SOURCE=gs://bucket[/prefix], from a Google
 Cloud Storage bucket (gcs.py); a failed run counts only if Renovate did not recover from it
 (to_report). The logs also name each repository whose run ended in an
-error, and the updates still pending OVERDUE_DAYS after their release.
+error, the updates still pending OVERDUE_DAYS after their release, and the
+dependencies whose newest release Renovate doesn't offer (STUCK_DAYS).
 Without FORGE_API it checks the run logs only, for a Renovate
 on another platform (one instance per log prefix, with its own state file). Keeps first-seen dates, and how far the logs have been read, in
 STATE_DIR/alert-state.json and notifies once per problem, as a single Apprise
@@ -28,6 +29,7 @@ what went bad as an alert, what went well silently (report.py).
 """
 
 import datetime as dt
+import fnmatch
 import glob
 import gzip
 import io
@@ -90,6 +92,10 @@ RUN_STALE_HOURS = int(os.environ.get("RUN_STALE_HOURS", "26"))
 # Days since its release before a pending update counts as overdue: no age
 # gate (minimumReleaseAge) lasts this long, so something else holds it.
 OVERDUE_DAYS = int(os.environ.get("OVERDUE_DAYS", "95"))
+# Days the newest release may be newer than the pin while Renovate offers no
+# update (add_stuck); 0: off. Leaves room for a release that lands between a
+# lookup and the next run.
+STUCK_DAYS = int(os.environ.get("STUCK_DAYS", "14"))
 
 # Dashboard Repository Problems that are expected, so never reported.
 HARMLESS_PROBLEMS = (
@@ -267,7 +273,7 @@ class Scan:
 
     def __init__(self):
         self.aborted = self.exit_error = False
-        self.skipped, self.dateless, self.results, self.overdue = {}, {}, {}, {}
+        self.skipped, self.dateless, self.results, self.overdue, self.stuck = {}, {}, {}, {}, {}
 
 
 def scan_log(path):
@@ -277,8 +283,9 @@ def scan_log(path):
     option to the branches it kept from being created, as "(repository=...,
     branch=...)" ids. Per repository: dateless holds the dependencies held
     pending for want of a release date, results how its run ended, as
-    (result, cause), and overdue the updates pending for longer than
-    OVERDUE_DAYS, as (depName, current, new, days). Reads LOG_FILE_FORMAT=pretty
+    (result, cause), overdue the updates pending for longer than
+    OVERDUE_DAYS, as (depName, current, new, days), and stuck the
+    dependencies add_stuck finds. Reads LOG_FILE_FORMAT=pretty
     and JSON logs. Streamed: a full debug log runs to tens of megabytes, so
     only the record being read is held.
     """
@@ -340,6 +347,7 @@ def read_record(scan, causes, line, details):
         config = record_data(line, details).get("config")
         if isinstance(config, dict):
             add_overdue(scan.overdue, repo, config)
+            add_stuck(scan.stuck, repo, config)
 
 
 def error_message(line, details):
@@ -369,6 +377,80 @@ def add_overdue(overdue, repo, config):
                     if age > OVERDUE_DAYS:
                         new = update.get("newVersion") or update.get("newValue") or update.get("newDigest")
                         overdue.setdefault(repo, set()).add((dep.get("depName"), dep.get("currentValue"), new, age))
+
+
+def add_stuck(stuck, repo, config):
+    """Add repo's dependencies whose newest release Renovate doesn't offer, as (depName, packageName, current, newest, days).
+
+    Renovate logs a dependency's mostRecentTimestamp only when its highest
+    version is also its newest release. With no update offered, a highest
+    version STUCK_DAYS newer than the pin, or a pin missing from the releases
+    (days None), means the versions no longer sort by date, as after a
+    linuxserver -ls counter reset, or a rule holds the update back. Each
+    repository gets an entry, so a run that finds nothing clears an earlier one.
+    """
+    found = stuck.setdefault(repo, set())
+    if not STUCK_DAYS:
+        return
+    for files in config.values():
+        for file in files if isinstance(files, list) else []:
+            for dep in file.get("deps") or []:
+                if dep.get("skipReason") or dep.get("updates"):
+                    continue
+                try:
+                    newest = dt.datetime.fromisoformat(dep["mostRecentTimestamp"])
+                    pinned = dep.get("currentVersionTimestamp")
+                    gap = (newest - dt.datetime.fromisoformat(pinned)).days if pinned else None
+                except KeyError, TypeError, ValueError:
+                    continue
+                if gap is None or gap >= STUCK_DAYS:
+                    entry = (dep.get("depName"), dep.get("packageName"), dep.get("currentValue"), newest.date(), gap)
+                    found.add(entry)
+
+
+# The rule fields a hold names its dependencies in, and the dependency fields
+# each is compared with; matching both is close enough to leave a hold out.
+HOLD_MATCHERS = ("matchDepNames", "matchPackageNames")
+
+
+def name_matches(pattern, name):
+    """Whether a Renovate name pattern (exact, /regex/ or glob) matches name; negations match nothing."""
+    if not name or pattern.startswith("!"):
+        return False
+    if regex := re.fullmatch(r"/(.+)/(i?)", pattern):
+        return bool(re.search(regex[1], name, re.IGNORECASE if regex[2] else 0))
+    if any(c in pattern for c in "*?["):
+        return fnmatch.fnmatchcase(name, pattern)
+    return pattern == name
+
+
+def held(candidates):
+    """The (repo, depName) pairs of candidates that an allowedVersions rule in the version holds' config names.
+
+    Only for HOLDS_REPO (needs_you's holds settings), and only read when one
+    of its dependencies is a candidate. An unreadable file leaves out nothing.
+    """
+    repo = needs_you.HOLDS_REPO
+    deps = candidates.get(repo)
+    if not (repo and deps):
+        return set()
+    try:
+        rules = json.loads(needs_you.config_file()[0]).get("packageRules", [])
+    except (urllib.error.URLError, TimeoutError, KeyError, ValueError, AttributeError) as e:
+        print(f"Version holds unreadable, none left out of the stuck pins: {e}")
+        return set()
+    patterns = [
+        pattern
+        for rule in rules
+        if "allowedVersions" in rule
+        for field in HOLD_MATCHERS
+        for pattern in ([rule[field]] if isinstance(rule.get(field), str) else rule.get(field) or [])
+    ]
+    return {
+        (repo, dep)
+        for dep, package, *_ in deps
+        if any(name_matches(p, dep) or name_matches(p, package) for p in patterns)
+    }
 
 
 def to_report(runs, failed_before=False):
@@ -444,7 +526,7 @@ def check_renovate():
     new_logs = [(path, mtime) for path, mtime in logs if mtime > since]
     # A branch skipped again by each run is one problem, not one per run.
     aborted, exit_error, limited, skipped, dateless, runs = [], [], {}, {}, {}, []
-    results, overdue = {}, {}  # results: each repository's newest
+    results, overdue, stuck = {}, {}, {}  # results and stuck: each repository's newest
     for path, _ in new_logs:
         scan = scan_log(path)
         for repo, deps in scan.dateless.items():
@@ -452,6 +534,7 @@ def check_renovate():
         for repo, updates in scan.overdue.items():
             overdue.setdefault(repo, set()).update(updates)
         results.update(scan.results)
+        stuck.update(scan.stuck)
         name = run_name(path)
         runs.append((name, scan.aborted or scan.exit_error))
         if scan.aborted:
@@ -504,6 +587,21 @@ def check_renovate():
             problems[f"overdue:{repo}:{dep}:{new_value}"] = (
                 f"{dep} {current_value} -> {new_value} ({repo}): released {age} days ago and still pending. "
                 f"No age gate should last {OVERDUE_DAYS} days: check the repository's rules."
+            )
+
+    left_out = held(stuck)
+    for repo, deps in sorted(stuck.items()):
+        for dep, _, current_value, newest, gap in sorted(deps, key=str):
+            if (repo, dep) in left_out:
+                continue
+            why = (
+                f"its newest release ({newest}) is {gap} days newer than the pin"
+                if gap is not None
+                else f"the pin is not among its releases (newest {newest})"
+            )
+            problems[f"stuck:{repo}:{dep}:{current_value}"] = (
+                f"{dep} {current_value} ({repo}): Renovate offers no update, yet {why}. Its versions no longer "
+                "sort by date (a linuxserver -ls counter reset: re-pin by hand), or a rule holds the update back."
             )
 
     current = {}

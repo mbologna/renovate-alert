@@ -2,6 +2,7 @@ import datetime as dt
 import gzip
 import json
 import os
+import urllib.error
 
 import pytest
 
@@ -517,10 +518,10 @@ def test_error_message_without_one():
     assert ra.record_data("[1]\n", []) == {}
 
 
-def package_files(repo, updates):
-    config = {
-        "regex": [{"packageFile": "vars.tf", "deps": [{"depName": "k3s", "currentValue": "v1.0", "updates": updates}]}]
-    }
+def package_files(repo, updates=None, deps=None):
+    if deps is None:
+        deps = [{"depName": "k3s", "currentValue": "v1.0", "updates": updates}]
+    config = {"regex": [{"packageFile": "vars.tf", "deps": deps}]}
     detail = json.dumps({"config": config}, indent=2)[1:-1].strip("\n")
     return f"DEBUG: packageFiles with updates (repository={repo}, baseBranch=main)\n" + "".join(
         f"       {line}\n" for line in detail.splitlines()
@@ -567,3 +568,111 @@ def test_updates_pending_too_long_are_reported(env):
     assert "java 21 -> 25 (owner/dotfiles): released 100 days ago" in body
     for version in ("v1.5", "v1.1", "v1.2"):
         assert version not in body
+
+
+def pin(name, newest=None, pinned=None, **extra):
+    """A logged dependency with no update: its newest release and its pin's release, in days ago."""
+    dep = {"depName": name, "packageName": extra.pop("package", name), "currentValue": "1.0", "updates": []}
+    if newest is not None:
+        dep["mostRecentTimestamp"] = stamp(newest) if isinstance(newest, int) else newest
+    if pinned is not None:
+        dep["currentVersionTimestamp"] = stamp(pinned)
+    return dep | extra
+
+
+def test_pins_whose_newest_release_is_not_offered_are_reported(env):
+    log_dir, sent, _ = env
+    deps = [
+        pin("reset", newest=5),  # the pin isn't among the releases
+        pin("held-back", newest=5, pinned=40),
+        pin("recent", newest=5, pinned=15),  # 10 days: under STUCK_DAYS
+        pin("offered", newest=5, pinned=100, updates=[{"newValue": "2.0"}]),
+        pin("undated", pinned=100),  # no mostRecentTimestamp: a lower version is newer
+        pin("skipped", newest=5, skipReason="disabled"),
+        pin("garbled", newest="not a date"),
+    ]
+    write_log(log_dir, package_files("owner/old", deps=[pin("fixed", newest=5)]), age_hours=4, name="renovate-1.log")
+    write_log(log_dir, package_files("owner/infra", deps=deps), age_hours=3, name="renovate-2.log")
+    write_log(log_dir, package_files("owner/old", deps=[]), age_hours=2, name="renovate-3.log")  # the newest run wins
+    ra.main()
+    body = sent[0][1]
+    newest = (ra.NOW - dt.timedelta(days=5)).date()
+    assert (
+        f"reset 1.0 (owner/infra): Renovate offers no update, yet the pin is not among its releases (newest {newest}). "
+        "Its versions no longer sort by date (a linuxserver -ls counter reset: re-pin by hand), "
+        "or a rule holds the update back."
+    ) in body
+    assert (
+        f"held-back 1.0 (owner/infra): Renovate offers no update, yet its newest release ({newest}) is 35 days" in body
+    )
+    for name in ("recent", "offered", "undated", "skipped", "garbled", "fixed"):
+        assert f"- {name} " not in body
+    sent.clear()
+    ra.main()  # reported once while it lasts
+    assert sent == []
+
+
+def holds_config(monkeypatch, config_file):
+    monkeypatch.setattr(ra.needs_you, "HOLDS_REPO", "owner/infra")
+    monkeypatch.setattr(ra.needs_you, "config_file", config_file)
+
+
+def test_pins_a_version_hold_names_are_left_out(env, monkeypatch):
+    log_dir, sent, _ = env
+    rules = [
+        {"matchDepNames": ["qbittorrent"], "allowedVersions": "/^5\\.2\\./"},
+        {"matchPackageNames": ["/^ubuntu$/i", "ghcr.io/held/*", "!ghcr.io/free"], "allowedVersions": "x"},
+        {"matchDepNames": "single", "allowedVersions": "y"},
+        {"matchDepNames": ["not-a-hold"], "automerge": False},
+    ]
+    holds_config(monkeypatch, lambda: (json.dumps({"packageRules": rules}), "url"))
+    deps = [
+        pin("qbittorrent", newest=5, pinned=40),
+        pin("os", newest=5, pinned=40, package="Ubuntu"),
+        pin("ghcr.io/held/app", newest=5, pinned=40),
+        pin("single", newest=5, pinned=40),
+        pin("ghcr.io/free", newest=5, pinned=40),
+        pin("not-a-hold", newest=5, pinned=40),
+    ]
+    write_log(log_dir, package_files("owner/infra", deps=deps), age_hours=3, name="renovate-1.log")
+    write_log(log_dir, package_files("owner/other", deps=[pin("qbittorrent", newest=5)]), name="renovate-2.log")
+    ra.main()
+    body = sent[0][1]
+    for name in ("qbittorrent 1.0 (owner/infra)", "os ", "ghcr.io/held/app", "single"):
+        assert f"- {name}" not in body
+    for name in ("ghcr.io/free 1.0 (owner/infra)", "not-a-hold 1.0 (owner/infra)", "qbittorrent 1.0 (owner/other)"):
+        assert f"- {name}" in body
+
+
+def test_pins_are_all_reported_when_the_holds_are_unreadable(env, monkeypatch, capsys):
+    log_dir, sent, _ = env
+
+    def unreadable():
+        raise urllib.error.URLError("timed out")
+
+    holds_config(monkeypatch, unreadable)
+    write_log(log_dir, package_files("owner/infra", deps=[pin("qbittorrent", newest=5)]))
+    ra.main()
+    assert "- qbittorrent 1.0 (owner/infra)" in sent[0][1]
+    assert "Version holds unreadable" in capsys.readouterr().out
+
+
+def test_holds_are_read_only_for_a_candidate_in_their_repository(env, monkeypatch):
+    log_dir, sent, _ = env
+
+    def never():
+        raise AssertionError("read the holds")
+
+    holds_config(monkeypatch, never)
+    write_log(log_dir, package_files("owner/infra", deps=[pin("fine", newest=5, pinned=5)]), name="renovate-1.log")
+    write_log(log_dir, package_files("owner/other", deps=[pin("app", newest=5)]), name="renovate-2.log")
+    ra.main()
+    assert "- app 1.0 (owner/other)" in sent[0][1]
+
+
+def test_stuck_days_zero_turns_the_check_off(env, monkeypatch):
+    log_dir, sent, _ = env
+    monkeypatch.setattr(ra, "STUCK_DAYS", 0)
+    write_log(log_dir, package_files("owner/infra", deps=[pin("reset", newest=5)]))
+    ra.main()
+    assert "reset" not in sent[0][1]  # the fixture's dashboard problem is still sent
