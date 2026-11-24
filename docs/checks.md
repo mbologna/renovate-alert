@@ -133,28 +133,26 @@ are joined into JSON; a record that doesn't parse is skipped.
 
 ## Stuck pins
 
-The same record gives each dependency's `mostRecentTimestamp`, which Renovate
-sets only when the highest version is also the newest release, and
+The same record gives each dependency's `mostRecentTimestamp` and
 `currentVersionTimestamp`, the pin's release date. A dependency with no
-updates, no `skipReason` and a `mostRecentTimestamp` is reported when that
-date is `STUCK_DAYS` (default 14) or more after `currentVersionTimestamp`, or
-when the pin has no date because it isn't among the releases. Its newest
-release then ranks at or below the pin, so the versions no longer sort by date,
-or a rule holds the update back. One case is a linuxserver image whose `-ls`
-counter was reset, when the image's datasource keeps only the new builds: they
-all rank below the pin, so Renovate never offers one, and nothing else reports
-it. When a lower version is newer than the highest, Renovate leaves
-`mostRecentTimestamp` out and nothing is reported. A reset whose old builds
-stay in the releases therefore goes unseen, as does a maintenance line
-releasing below a newer major. Each repository's newest run decides, so a run
-that no longer finds a pin clears it.
+updates, no `skipReason`, a `mostRecentTimestamp` and no
+`currentVersionTimestamp` is reported: it has releases, but the pin isn't
+among them, so no update will come. One case is a linuxserver image whose
+`-ls` counter was reset, when the image's datasource keeps only the new builds:
+they all rank below the pin, so Renovate never offers one, and nothing else
+reports it. Each repository's newest run decides, so a run that no longer finds
+a pin clears it.
 
-With `HOLDS_REPO` set (see [upkeep.md](upkeep.md)), the config file the version
-holds come from is read when one of that repository's dependencies is
-reported. A dependency named by a rule with `allowedVersions` is left out:
-`matchDepNames` and `matchPackageNames` entries are compared with both its
-`depName` and its `packageName`, exactly, as a `/regex/` or as a glob, and
-negated entries are ignored. If the file can't be read, nothing is left out.
+A pin older than `mostRecentTimestamp` is not reported. Renovate computes that
+date from the raw releases, before `extractVersion`, the unstable filter and
+`allowedVersions` drop any, so it is often a release the dependency never
+considers: a Python alpha among `actions/python-versions` releases, a nightly
+tag, or a major a rule holds back. 1.12.0 reported a pin 14 days older, and
+every hit in the GitLab and GitHub runs of 2026-11 was one of these. A real
+sort-order break doesn't show there either: when a lower version is newer than
+the highest, Renovate leaves `mostRecentTimestamp` out. A reset whose old
+builds stay in the releases therefore goes unseen, as does a maintenance line
+releasing below a newer major.
 
 ## Forgejo/Gitea checks
 
