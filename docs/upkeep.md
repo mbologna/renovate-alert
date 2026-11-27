@@ -20,12 +20,15 @@ projection is made until `GITLAB_MINUTES_PROJECT_AFTER_DAYS` full days of the
 month have passed (default 7), as one release build on the 1st projects to
 thirty.
 
-The namespace's storage, with its container registry share, is listed at
-`GITLAB_STORAGE_WARN` percent (default 80) of `GITLAB_STORAGE_LIMIT_GIB`
-(default 5). The entries link the namespace's usage quotas page.
+Each project whose repository and LFS objects reach `GITLAB_STORAGE_WARN`
+percent (default 80) of `GITLAB_STORAGE_LIMIT_GIB` (default 10) is listed, with
+a link to the project's usage quotas page. That is the Free tier's limit: 10 GiB
+per project, counting the repository and LFS only. The container registry counts
+against no limit, so the run only prints its total. The minutes entry links the
+namespace's usage quotas page.
 
-Both come from GitLab's GraphQL API (`ciMinutesUsage`,
-`namespace.rootStorageStatistics`), which works for a user namespace and a
+Both come from GitLab's GraphQL API (`ciMinutesUsage`, and each project's
+`statistics` under `namespace.projects`, subgroups included), which works for a user namespace and a
 group alike. The check needs `GITLAB_TOKEN` and `GITLAB_NAMESPACE`, a token
 with the `read_api` (or `api`) scope, and the token's user must own the
 namespace. It skips, sending nothing, when:
@@ -33,7 +36,7 @@ namespace. It skips, sending nothing, when:
 - the token's scopes (from `GET /personal_access_tokens/self`) lack both, with
   `GitLab usage skipped: GITLAB_TOKEN has no read_api scope (api works too).`;
 - GraphQL answers HTTP 401 or 403;
-- the namespace has no storage statistics (storage only), with `GitLab storage
+- no project has storage statistics (storage only), with `GitLab storage
   skipped: no storage statistics (the token's user must own the namespace).`
 
 A namespace that GraphQL can't find counts as a failed read.

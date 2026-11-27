@@ -16,7 +16,7 @@ STATE_DIR (default LOG_DIR)/needs-you-state.json, keyed by PR URL and reason, so
 stays open is not repeated, and one that goes away and comes back is.
 
 Four optional checks, each off unless switched on, add entries to the same
-message with the same rules: GitLab CI minutes and namespace storage near the
+message with the same rules: GitLab CI minutes and project storage near the
 quota (GITLAB_USAGE), forge tokens close to expiry (TOKEN_EXPIRY), GitHub
 workflows disabled for inactivity (DISABLED_WORKFLOWS), and every fourth
 Monday the version holds (packageRules with allowedVersions) of a Renovate
@@ -61,7 +61,9 @@ def switch(name):
     return value == "on"
 
 
-# GitLab CI minutes and namespace storage against the free tier's quotas.
+# GitLab CI minutes and each project's storage against the free tier's quotas:
+# 400 minutes a month, and 10 GiB of repository and LFS per project (the
+# container registry counts against no limit).
 GITLAB_USAGE = switch("GITLAB_USAGE")
 GITLAB_MINUTES_QUOTA = int(os.environ.get("GITLAB_MINUTES_QUOTA") or 400)
 GITLAB_MINUTES_WARN = int(os.environ.get("GITLAB_MINUTES_WARN") or 75)
@@ -69,7 +71,7 @@ GITLAB_MINUTES_PROJECTED_WARN = int(os.environ.get("GITLAB_MINUTES_PROJECTED_WAR
 # A projection from the first days of a month is mostly noise: one release
 # build on the 1st projects to thirty.
 GITLAB_MINUTES_PROJECT_AFTER_DAYS = int(os.environ.get("GITLAB_MINUTES_PROJECT_AFTER_DAYS") or 7)
-GITLAB_STORAGE_LIMIT_GIB = float(os.environ.get("GITLAB_STORAGE_LIMIT_GIB") or 5)
+GITLAB_STORAGE_LIMIT_GIB = float(os.environ.get("GITLAB_STORAGE_LIMIT_GIB") or 10)
 GITLAB_STORAGE_WARN = int(os.environ.get("GITLAB_STORAGE_WARN") or 80)
 # The GitHub and GitLab tokens' expiry dates.
 TOKEN_EXPIRY = switch("TOKEN_EXPIRY")
@@ -344,22 +346,33 @@ def graphql(query, variables):
     return answer["data"]
 
 
-USAGE_QUERY = """query($path: ID!) {
-  namespace(fullPath: $path) { id rootStorageStatistics { storageSize containerRegistrySize } }
+USAGE_QUERY = """query($path: ID!, $after: String) {
+  namespace(fullPath: $path) {
+    id
+    projects(includeSubgroups: true, first: 100, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes { fullPath webUrl statistics { repositorySize lfsObjectsSize containerRegistrySize } }
+    }
+  }
 }"""
 MINUTES_QUERY = """query($id: NamespaceID, $month: Date) {
   ciMinutesUsage(namespaceId: $id, date: $month) { nodes { monthIso8601 minutes } }
 }"""
 
 
+def counted_storage(stats):
+    """The GiB of a project's statistics that count against its storage limit: repository and LFS."""
+    return ((stats["repositorySize"] or 0) + (stats["lfsObjectsSize"] or 0)) / GIB
+
+
 def gitlab_usage():
-    """GITLAB_NAMESPACE's CI minutes this month, used and projected, and its storage, against their limits."""
+    """GITLAB_NAMESPACE's CI minutes this month, used and projected, and its projects' storage, against their limits."""
     info = gitlab_token_info()
     if info is not None and not {"api", "read_api"} & set(info.get("scopes", [])):
         print("GitLab usage skipped: GITLAB_TOKEN has no read_api scope (api works too).")
         return []
     try:
-        namespace = graphql(USAGE_QUERY, {"path": GITLAB_NAMESPACE})["namespace"]
+        namespace = graphql(USAGE_QUERY, {"path": GITLAB_NAMESPACE, "after": None})["namespace"]
     except urllib.error.HTTPError as e:
         if e.code not in (401, 403):
             raise
@@ -392,17 +405,32 @@ def gitlab_usage():
     if reasons:
         items.append(entry("GitLab", group, title, f"{quotas}#pipelines-quota-tab", reasons, "; ".join(reasons)))
 
-    storage = namespace["rootStorageStatistics"]
-    if not storage:
+    projects, page = [], namespace["projects"]
+    while True:
+        projects += [node for node in page["nodes"] if node["statistics"]]
+        if not page["pageInfo"]["hasNextPage"]:
+            break
+        variables = {"path": GITLAB_NAMESPACE, "after": page["pageInfo"]["endCursor"]}
+        page = graphql(USAGE_QUERY, variables)["namespace"]["projects"]
+    if not projects:
         print("GitLab storage skipped: no storage statistics (the token's user must own the namespace).")
         return items
-    size, registry = storage["storageSize"] / GIB, storage["containerRegistrySize"] / GIB
-    percent = 100 * size / GITLAB_STORAGE_LIMIT_GIB
-    title = f"Storage: {size:.1f} GiB of {GITLAB_STORAGE_LIMIT_GIB:g} GiB ({percent:.0f}%), container registry {registry:.1f} GiB"
-    print(title)
-    if percent >= GITLAB_STORAGE_WARN:
-        reason = f"storage over {GITLAB_STORAGE_WARN}%"
-        items.append(entry("GitLab", group, title, f"{quotas}#storage-quota-tab", [reason], reason))
+    # The limit counts a project's repository and LFS objects; the registry is listed, not counted.
+    sizes = {node["fullPath"]: counted_storage(node["statistics"]) for node in projects}
+    registry = sum(node["statistics"]["containerRegistrySize"] or 0 for node in projects) / GIB
+    for node in sorted(projects, key=lambda node: node["fullPath"]):
+        size = sizes[node["fullPath"]]
+        percent = 100 * size / GITLAB_STORAGE_LIMIT_GIB
+        if percent >= GITLAB_STORAGE_WARN:
+            title = f"Storage: {node['fullPath']} {size:.1f} GiB of {GITLAB_STORAGE_LIMIT_GIB:g} GiB ({percent:.0f}%)"
+            print(title)
+            reason = f"storage over {GITLAB_STORAGE_WARN}%"
+            items.append(entry("GitLab", group, title, f"{node['webUrl']}/-/usage_quotas", [reason], reason))
+    largest = max(sizes, key=sizes.get)
+    print(
+        f"Storage: {len(sizes)} projects, the largest {largest} at {sizes[largest]:.1f} GiB of"
+        f" {GITLAB_STORAGE_LIMIT_GIB:g} GiB; container registry {registry:.1f} GiB, not counted"
+    )
     return items
 
 

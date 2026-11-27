@@ -38,7 +38,7 @@ With `NEEDS_YOU` ([docs/needs-you.md](docs/needs-you.md)) and the upkeep checks
 
 - A Renovate PR is held for manual review, or its CI failed.
 - The Renovate app has stopped visiting a GitHub repository.
-- GitLab CI minutes or namespace storage are near the quota.
+- GitLab CI minutes, or a project's storage, are near the quota.
 - `GITHUB_TOKEN` or `GITLAB_TOKEN` expires soon.
 - GitHub disabled a scheduled workflow for inactivity.
 - A Renovate config holds versions back (`allowedVersions`), listed every fourth Monday.
@@ -136,7 +136,7 @@ Every variable the code reads:
 | `GITLAB_MINUTES_WARN` | `75` | Percent of the quota used that lists it |
 | `GITLAB_MINUTES_PROJECTED_WARN` | `100` | Percent of the quota projected by month end that lists it |
 | `GITLAB_MINUTES_PROJECT_AFTER_DAYS` | `7` | Days into the month before minutes are projected |
-| `GITLAB_STORAGE_LIMIT_GIB` | `5` | Namespace storage limit in GiB (decimals allowed) |
+| `GITLAB_STORAGE_LIMIT_GIB` | `10` | Storage limit of each project's repository and LFS in GiB (decimals allowed); the container registry is not counted |
 | `GITLAB_STORAGE_WARN` | `80` | Percent of the storage limit that lists it |
 | `TOKEN_EXPIRY` | `off` | `on`: list `GITHUB_TOKEN` and `GITLAB_TOKEN` close to expiry |
 | `TOKEN_EXPIRY_DAYS` | `30` | Days before expiry that list a token |
