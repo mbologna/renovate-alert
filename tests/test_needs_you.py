@@ -671,8 +671,22 @@ USER_NS = "gid://gitlab/Namespaces::UserNamespace/42"
 GIB = 1024**3
 
 
-def route_usage(fake, minutes=0, storage=1 * GIB, registry=0, namespace_id=USER_NS, scopes=("api",)):
-    """GitLab answers the token's details and both GraphQL queries; minutes is this month's use."""
+def project(path, repository=1 * GIB, lfs=0, registry=0):
+    """A project node of the usage query, with its storage statistics."""
+    stats = {
+        "repositorySize": float(repository),
+        "lfsObjectsSize": float(lfs),
+        "containerRegistrySize": float(registry),
+    }
+    return {"fullPath": path, "webUrl": f"https://gitlab.example/{path}", "statistics": stats}
+
+
+def route_usage(fake, minutes=0, storage=1 * GIB, registry=0, namespace_id=USER_NS, scopes=("api",), pages=None):
+    """GitLab answers the token's details and both GraphQL queries; minutes is this month's use.
+
+    The namespace holds one project, owner/app, with storage in its repository,
+    unless pages lists the project nodes of each page of the usage query.
+    """
     route_gitlab(fake)
     fake.routes[TOKEN_SELF] = {"name": "alerts", "scopes": list(scopes), "expires_at": None}
     month = ny.NOW.date().replace(day=1).isoformat()
@@ -683,9 +697,12 @@ def route_usage(fake, minutes=0, storage=1 * GIB, registry=0, namespace_id=USER_
             assert body["variables"] == {"id": namespace_id, "month": month}
             nodes = [{"monthIso8601": month, "minutes": minutes}]
             return {"data": {"ciMinutesUsage": {"nodes": nodes}}}
-        assert body["variables"] == {"path": "owner"}
-        stats = {"storageSize": float(storage), "containerRegistrySize": float(registry)}
-        return {"data": {"namespace": {"id": namespace_id, "rootStorageStatistics": stats}}}
+        assert body["variables"]["path"] == "owner"
+        all_pages = pages or [[project("owner/app", storage, registry=registry)]]
+        index = int(body["variables"]["after"] or 0)
+        info = {"hasNextPage": index + 1 < len(all_pages), "endCursor": str(index + 1)}
+        projects = {"pageInfo": info, "nodes": all_pages[index]}
+        return {"data": {"namespace": {"id": namespace_id, "projects": projects}}}
 
     fake.routes[GRAPHQL] = graphql
 
@@ -700,7 +717,7 @@ def usage(forges, monkeypatch):
 def test_gitlab_usage_minutes_and_storage(usage):
     fake, sent = usage
     # 9 days and 13 hours into a 30-day month: 150 minutes project to 471.
-    route_usage(fake, minutes=150 + 150, storage=4.5 * GIB, registry=4 * GIB)
+    route_usage(fake, minutes=150 + 150, storage=9 * GIB, registry=4 * GIB)
     assert ny.run() == []
     title, body = sent[0]
     assert title == "Renovate: 2 item(s) need you, 2 new"
@@ -709,15 +726,15 @@ def test_gitlab_usage_minutes_and_storage(usage):
         "- CI minutes: 300 of 400 used (75%), 943 projected by month end (236%)\n"
         "  CI minutes over 75%; CI minutes projected over 100% (new)\n"
         "  https://gitlab.example/-/profile/usage_quotas#pipelines-quota-tab\n"
-        "- Storage: 4.5 GiB of 5 GiB (90%), container registry 4.0 GiB\n"
+        "- Storage: owner/app 9.0 GiB of 10 GiB (90%)\n"
         "  storage over 80% (new)\n"
-        "  https://gitlab.example/-/profile/usage_quotas#storage-quota-tab"
+        "  https://gitlab.example/owner/app/-/usage_quotas"
     )
     graphql = next(req for req, _ in fake.requests if req.full_url == GRAPHQL)
     assert graphql.get_header("Authorization") == "Bearer gl-token"
 
     # The numbers grow the next day, but the reasons are the same: no news.
-    route_usage(fake, minutes=320, storage=4.6 * GIB)
+    route_usage(fake, minutes=320, storage=9.2 * GIB)
     ny.run()
     assert len(sent) == 1
 
@@ -745,17 +762,17 @@ def test_gitlab_minutes_thresholds_are_configurable(usage, monkeypatch):
         "GITLAB_MINUTES_QUOTA": 1000,
         "GITLAB_MINUTES_WARN": 50,
         "GITLAB_MINUTES_PROJECTED_WARN": 200,
-        "GITLAB_STORAGE_LIMIT_GIB": 10,
+        "GITLAB_STORAGE_LIMIT_GIB": 20,
         "GITLAB_STORAGE_WARN": 40,
     }.items():
         monkeypatch.setattr(ny, name, value)
-    route_usage(fake, minutes=600, storage=4.5 * GIB)
+    route_usage(fake, minutes=600, storage=9 * GIB)
     ny.run()
     assert (
         "CI minutes: 600 of 1000 used (60%), 1886 projected by month end (189%)\n  CI minutes over 50% (new)"
         in (sent[0][1])
     )
-    assert "Storage: 4.5 GiB of 10 GiB (45%), container registry 0.0 GiB\n  storage over 40%" in sent[0][1]
+    assert "Storage: owner/app 9.0 GiB of 20 GiB (45%)\n  storage over 40%" in sent[0][1]
 
 
 def test_gitlab_minutes_not_projected_early_in_the_month(usage, monkeypatch, capsys):
@@ -769,9 +786,31 @@ def test_gitlab_minutes_not_projected_early_in_the_month(usage, monkeypatch, cap
 
 def test_gitlab_group_namespace_usage_link(usage):
     fake, sent = usage
-    route_usage(fake, storage=5 * GIB, namespace_id="gid://gitlab/Group/7")
+    route_usage(fake, minutes=320, namespace_id="gid://gitlab/Group/7")
     ny.run()
-    assert "https://gitlab.example/groups/owner/-/usage_quotas#storage-quota-tab" in sent[0][1]
+    assert "https://gitlab.example/groups/owner/-/usage_quotas#pipelines-quota-tab" in sent[0][1]
+
+
+def test_gitlab_storage_counts_repository_and_lfs_per_project(usage, capsys):
+    fake, sent = usage
+    pages = [
+        # 30 GiB of registry in all, which no limit counts.
+        [project("owner/images", repository=1 * GIB, registry=20 * GIB)],
+        [project("owner/fonts", repository=2 * GIB, lfs=6.5 * GIB, registry=10 * GIB), project("owner/small")],
+    ]
+    route_usage(fake, pages=pages)
+    ny.run()
+    assert sent[0][1] == (
+        "GitLab owner usage quotas\n"
+        "- Storage: owner/fonts 8.5 GiB of 10 GiB (85%)\n"
+        "  storage over 80% (new)\n"
+        "  https://gitlab.example/owner/fonts/-/usage_quotas"
+    )
+    out = capsys.readouterr().out
+    assert (
+        "Storage: 3 projects, the largest owner/fonts at 8.5 GiB of 10 GiB; container registry 30.0 GiB, not counted"
+        in out
+    )
 
 
 def test_gitlab_usage_needs_read_api(usage, capsys):
@@ -794,14 +833,12 @@ def test_gitlab_usage_graphql_refused(usage, capsys):
 
 def test_gitlab_usage_errors_keep_the_last_read(usage):
     fake, sent = usage
-    route_usage(fake, storage=5 * GIB)
+    route_usage(fake, storage=9 * GIB)
     ny.run()
     fake.routes[GRAPHQL] = lambda req: {"errors": [{"message": "Internal server error"}]}
     assert ny.run() == ["GitLab usage could not be read (Internal server error); its entries are as of the last check."]
     assert len(sent) == 1
-    assert json.load(open(ny.STATE))["sent"] == [
-        "https://gitlab.example/-/profile/usage_quotas#storage-quota-tab storage over 80%"
-    ]
+    assert json.load(open(ny.STATE))["sent"] == ["https://gitlab.example/owner/app/-/usage_quotas storage over 80%"]
 
 
 @pytest.fixture
